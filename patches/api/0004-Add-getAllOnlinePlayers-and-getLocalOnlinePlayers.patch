@@ -5,7 +5,7 @@ Subject: [PATCH] Add getAllOnlinePlayers and getLocalOnlinePlayers
 
 
 diff --git a/src/main/java/com/destroystokyo/paper/Title.java b/src/main/java/com/destroystokyo/paper/Title.java
-index 9e90c3df567a65b48a0b9341f784eb902cb35d8c..a860efd3010bcc5ab8ae616c9ca4980754633670 100644
+index 20a028450667edf102b59b6b50ac6e890f2c34ab..1629d597b4a5b5baffa141c6231c79258f67ffd6 100644
 --- a/src/main/java/com/destroystokyo/paper/Title.java
 +++ b/src/main/java/com/destroystokyo/paper/Title.java
 @@ -268,7 +268,7 @@ public final class Title {
@@ -18,10 +18,10 @@ index 9e90c3df567a65b48a0b9341f784eb902cb35d8c..a860efd3010bcc5ab8ae616c9ca49807
  
      @NotNull
 diff --git a/src/main/java/com/destroystokyo/paper/event/server/PaperServerListPingEvent.java b/src/main/java/com/destroystokyo/paper/event/server/PaperServerListPingEvent.java
-index e886ac04c0c14ae5dfb87212e262b96ec5b3b9dc..906341ce6cf279357d5f1c59fdd846da3d34b71f 100644
+index acff2ff570f8419ffa4dfefe890795c63d75325d..1d632d311d9fbb1b1bf6760ddc1e257d2a96576e 100644
 --- a/src/main/java/com/destroystokyo/paper/event/server/PaperServerListPingEvent.java
 +++ b/src/main/java/com/destroystokyo/paper/event/server/PaperServerListPingEvent.java
-@@ -272,7 +272,7 @@ public class PaperServerListPingEvent extends ServerListPingEvent implements Can
+@@ -306,7 +306,7 @@ public class PaperServerListPingEvent extends ServerListPingEvent implements Can
  
      @NotNull
      protected Object[] getOnlinePlayers() {
@@ -31,10 +31,10 @@ index e886ac04c0c14ae5dfb87212e262b96ec5b3b9dc..906341ce6cf279357d5f1c59fdd846da
  
      @NotNull
 diff --git a/src/main/java/org/bukkit/Bukkit.java b/src/main/java/org/bukkit/Bukkit.java
-index 9518d779a6dd04a21887915f4835243ac9e85986..4485e50a4ce952638f78694223a24ad7b69ebdcd 100644
+index 09327627d11fcca94c39ce23aee501198e59286e..7440661e7811a5b8261980b6afd8acdde7fcf7e4 100644
 --- a/src/main/java/org/bukkit/Bukkit.java
 +++ b/src/main/java/org/bukkit/Bukkit.java
-@@ -169,8 +169,11 @@ public final class Bukkit {
+@@ -171,8 +171,11 @@ public final class Bukkit {
      }
      // Paper end
  
@@ -47,7 +47,7 @@ index 9518d779a6dd04a21887915f4835243ac9e85986..4485e50a4ce952638f78694223a24ad7
       * Collections#unmodifiableCollection(Collection) view} is a reused
       * object, making some operations like {@link Collection#size()}
       * zero-allocation.
-@@ -201,6 +204,73 @@ public final class Bukkit {
+@@ -203,6 +206,73 @@ public final class Bukkit {
          return server.getOnlinePlayers();
      }
  
@@ -122,10 +122,10 @@ index 9518d779a6dd04a21887915f4835243ac9e85986..4485e50a4ce952638f78694223a24ad7
       * Get the maximum amount of players which can login to this server.
       *
 diff --git a/src/main/java/org/bukkit/Server.java b/src/main/java/org/bukkit/Server.java
-index d0b47de04b24a5cd4f1de260214ef2f62eb09999..2b1ea1f427dc757b9e5da656cb9cb341acd00d00 100644
+index da801d90f253ccaffcafa22a0d02cf5476c24a88..f0380ad187ba97dc943a77067d59bc83db96e2c3 100644
 --- a/src/main/java/org/bukkit/Server.java
 +++ b/src/main/java/org/bukkit/Server.java
-@@ -125,8 +125,11 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
+@@ -130,8 +130,11 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
      String getMinecraftVersion();
      // Paper end
  
@@ -138,7 +138,7 @@ index d0b47de04b24a5cd4f1de260214ef2f62eb09999..2b1ea1f427dc757b9e5da656cb9cb341
       * Collections#unmodifiableCollection(Collection) view} is a reused
       * object, making some operations like {@link Collection#size()}
       * zero-allocation.
-@@ -155,6 +158,69 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
+@@ -160,6 +163,69 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
      @NotNull
      public Collection<? extends Player> getOnlinePlayers();
  
@@ -209,10 +209,10 @@ index d0b47de04b24a5cd4f1de260214ef2f62eb09999..2b1ea1f427dc757b9e5da656cb9cb341
       * Get the maximum amount of players which can login to this server.
       *
 diff --git a/src/main/java/org/bukkit/command/Command.java b/src/main/java/org/bukkit/command/Command.java
-index b791358f90fe92bc2264d9a26492245763813af3..37fe0166d8cca0b380b9a1d3ea8736469f85ea79 100644
+index 0a26fffe9b1e5080b5639767a03af11006108b4a..66c4c954754993fcd1f59661a3c5f767224242fd 100644
 --- a/src/main/java/org/bukkit/command/Command.java
 +++ b/src/main/java/org/bukkit/command/Command.java
-@@ -108,7 +108,7 @@ public abstract class Command {
+@@ -116,7 +116,7 @@ public abstract class Command {
          Player senderPlayer = sender instanceof Player ? (Player) sender : null;
  
          ArrayList<String> matchedPlayers = new ArrayList<String>();
@@ -222,10 +222,10 @@ index b791358f90fe92bc2264d9a26492245763813af3..37fe0166d8cca0b380b9a1d3ea873646
              if ((senderPlayer == null || senderPlayer.canSee(player)) && StringUtil.startsWithIgnoreCase(name, lastWord)) {
                  matchedPlayers.add(name);
 diff --git a/src/main/java/org/bukkit/event/player/PlayerChatEvent.java b/src/main/java/org/bukkit/event/player/PlayerChatEvent.java
-index 3a1da86e3dbf18c6e1040086c1df4b8976bc2b9d..62a5bcc57d783f62c0bcf8e10b2c5b781c4290cd 100644
+index 2c021bc2ff18f0b3af5feb9dafc8ccebd604f8b5..8268379b58a443199bb011f96c6347b229ee5645 100644
 --- a/src/main/java/org/bukkit/event/player/PlayerChatEvent.java
 +++ b/src/main/java/org/bukkit/event/player/PlayerChatEvent.java
-@@ -33,7 +33,7 @@ public class PlayerChatEvent extends PlayerEvent implements Cancellable {
+@@ -27,7 +27,7 @@ public class PlayerChatEvent extends PlayerEvent implements Cancellable {
          super(player);
          this.message = message;
          this.format = "<%1$s> %2$s";
@@ -235,7 +235,7 @@ index 3a1da86e3dbf18c6e1040086c1df4b8976bc2b9d..62a5bcc57d783f62c0bcf8e10b2c5b78
  
      public PlayerChatEvent(@NotNull final Player player, @NotNull final String message, @NotNull final String format, @NotNull final Set<Player> recipients) {
 diff --git a/src/main/java/org/bukkit/event/player/PlayerCommandPreprocessEvent.java b/src/main/java/org/bukkit/event/player/PlayerCommandPreprocessEvent.java
-index 48a00fb50fe32c732a578d5179b3bb43ffd68b69..818fc5dab887314e36424fa4092bd62967fcb215 100644
+index 6d7ee2c6e053ea9af9116e7c2adb521f12b914df..d00475eb34a7a2304eb7957662f83e86dab1aeab 100644
 --- a/src/main/java/org/bukkit/event/player/PlayerCommandPreprocessEvent.java
 +++ b/src/main/java/org/bukkit/event/player/PlayerCommandPreprocessEvent.java
 @@ -53,7 +53,7 @@ public class PlayerCommandPreprocessEvent extends PlayerEvent implements Cancell

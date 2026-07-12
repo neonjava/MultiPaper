@@ -5,10 +5,10 @@ Subject: [PATCH] Mark permissions as dirty when modified
 
 
 diff --git a/src/main/java/org/bukkit/permissions/PermissibleBase.java b/src/main/java/org/bukkit/permissions/PermissibleBase.java
-index cd3296fea01648592d2af89b3d80135acb6d0958..c1cbb006a2f98b6ade35a7aab77a2624462f4090 100644
+index 30b98d1645c571ba5c18e5cc93b0bec3f74b1d3b..34bc958a5c5bcddb4e5cbe992e1639f8988ed11f 100644
 --- a/src/main/java/org/bukkit/permissions/PermissibleBase.java
 +++ b/src/main/java/org/bukkit/permissions/PermissibleBase.java
-@@ -20,6 +20,7 @@ public class PermissibleBase implements Permissible {
+@@ -21,6 +21,7 @@ public class PermissibleBase implements Permissible {
      private final Permissible parent;
      private final List<PermissionAttachment> attachments = new LinkedList<PermissionAttachment>();
      private final Map<String, PermissionAttachmentInfo> permissions = new HashMap<String, PermissionAttachmentInfo>();
@@ -16,7 +16,7 @@ index cd3296fea01648592d2af89b3d80135acb6d0958..c1cbb006a2f98b6ade35a7aab77a2624
  
      public PermissibleBase(@Nullable ServerOperator opable) {
          this.opable = opable;
-@@ -176,6 +177,8 @@ public class PermissibleBase implements Permissible {
+@@ -177,6 +178,8 @@ public class PermissibleBase implements Permissible {
          for (PermissionAttachment attachment : attachments) {
              calculateChildPermissions(attachment.getPermissions(), false, attachment);
          }
