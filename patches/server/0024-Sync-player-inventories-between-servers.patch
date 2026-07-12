@@ -1,0 +1,1016 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: neonjava <neonjavadev@gmail.com>
+Date: Sun, 12 Jul 2026 16:44:10 +0530
+Subject: [PATCH] Sync player inventories between servers
+
+Port Patch 24 to 1.21.1: forward container/item interaction events for external owners, add inventory sync packet handlers, and add dirty-tracked inventory/list wrappers for cross-server state updates.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+diff --git a/src/main/java/net/minecraft/server/level/ServerPlayer.java b/src/main/java/net/minecraft/server/level/ServerPlayer.java
+index 8c338279cd9c3df529dafee807f5f81159420e7e..3387d02e42b00182438b62ba5dabebded0fe7cd8 100644
+--- a/src/main/java/net/minecraft/server/level/ServerPlayer.java
++++ b/src/main/java/net/minecraft/server/level/ServerPlayer.java
+@@ -276,6 +276,7 @@ public class ServerPlayer extends net.minecraft.world.entity.player.Player imple
+     @Nullable
+     public final Object object;
+     private int containerCounter;
++    @Nullable public puregero.multipaper.ExternalServer openContainer; // MultiPaper
+     public boolean wonGame;
+     public boolean hasRegisteredOnMaster = false; // MultiPaper
+     public boolean didMultiPaperJoin = false; // MultiPaper
+diff --git a/src/main/java/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/src/main/java/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index c192c5a2bb1826ecd09a35afebf8504cad9f8c04..ee6c9b41b3ddad95622511c12630e86e97d03ffb 100644
+--- a/src/main/java/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/src/main/java/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -248,6 +248,8 @@ import org.bukkit.inventory.InventoryView;
+ import org.bukkit.inventory.SmithingInventory;
+ import puregero.multipaper.ExternalPlayer;
+ import puregero.multipaper.MultiPaper;
++import puregero.multipaper.MultiPaperInventoryHandler;
++import puregero.multipaper.externalserverprotocol.PlayerActionPacket;
+ import puregero.multipaper.externalserverprotocol.PlayerRemovePacket;
+ // CraftBukkit end
+ 
+@@ -754,6 +756,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleAcceptTeleportPacket(ServerboundAcceptTeleportationPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        MultiPaperInventoryHandler.handleAcceptTeleport(this.player, packet); // MultiPaper
+         if (packet.getId() == this.awaitingTeleport) {
+             if (this.awaitingPositionFromClient == null) {
+                 ServerGamePacketListenerImpl.LOGGER.warn("Disconnected on accept teleport packet. Was not expecting position data from client at this time"); // Purpur
+@@ -788,6 +791,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleRecipeBookChangeSettingsPacket(ServerboundRecipeBookChangeSettingsPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        MultiPaperInventoryHandler.handleContainerEvent(this.player, packet); // MultiPaper
+         CraftEventFactory.callRecipeBookSettingsEvent(this.player, packet.getBookType(), packet.isOpen(), packet.isFiltering()); // CraftBukkit
+         this.player.getRecipeBook().setBookSetting(packet.getBookType(), packet.isOpen(), packet.isFiltering());
+     }
+@@ -1026,6 +1030,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleRenameItem(ServerboundRenameItemPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+         AbstractContainerMenu container = this.player.containerMenu;
+ 
+         if (container instanceof AnvilMenu containeranvil) {
+@@ -1042,6 +1047,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleSetBeaconPacket(ServerboundSetBeaconPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+         AbstractContainerMenu container = this.player.containerMenu;
+ 
+         if (container instanceof BeaconMenu containerbeacon) {
+@@ -1157,6 +1163,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleSelectTrade(ServerboundSelectTradePacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+         int i = packet.getItem();
+         AbstractContainerMenu container = this.player.containerMenu;
+ 
+@@ -1988,6 +1995,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+ 
+     @Override
+     public void handleUseItemOn(ServerboundUseItemOnPacket packet) {
++        if (MultiPaperInventoryHandler.handleInteractEvent(this.player, packet)) return; // MultiPaper - send to external server if necessary
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
+         if (this.player.isImmobile()) return; // CraftBukkit
+         if (!this.checkLimit(packet.timestamp)) return; // Spigot - check limit
+@@ -2052,6 +2060,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
+         if (this.player.isImmobile()) return; // CraftBukkit
+         if (!this.checkLimit(packet.timestamp)) return; // Spigot - check limit
++        if (MultiPaperInventoryHandler.handleUseItemEvent(this.player, packet)) return; // MultiPaper
+         this.ackBlockChangesUpTo(packet.getSequence());
+         ServerLevel worldserver = this.player.serverLevel();
+         InteractionHand enumhand = packet.getHand();
+@@ -2223,6 +2232,8 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+ 
+             this.player.getInventory().selected = packet.getSlot();
+             this.player.resetLastActionTime();
++            if (puregero.multipaper.MultiPaper.isRealPlayer(this.player)) puregero.multipaper.MultiPaper.broadcastPacketToExternalServers(this.player, new PlayerActionPacket(this.player, packet)); // MultiPaper
++            else this.player.detectEquipmentUpdates(); // MultiPaper
+         } else {
+             ServerGamePacketListenerImpl.LOGGER.warn("{} tried to set an invalid carried item", this.player.getName().getString());
+             this.disconnect(Component.literal("Invalid hotbar selection (Hacking?)"), org.bukkit.event.player.PlayerKickEvent.Cause.ILLEGAL_ACTION); // CraftBukkit // Paper - kick event cause
+@@ -3036,6 +3047,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     public void handleContainerClose(ServerboundContainerClosePacket packet, org.bukkit.event.inventory.InventoryCloseEvent.Reason reason) {
+         // Paper end - Inventory close reason
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+ 
+         if (this.player.isImmobile()) return; // CraftBukkit
+         CraftEventFactory.handleInventoryCloseEvent(this.player, reason); // CraftBukkit // Paper
+@@ -3046,6 +3058,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleContainerClick(ServerboundContainerClickPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+         if (this.player.isImmobile()) return; // CraftBukkit
+         this.player.resetLastActionTime();
+         if (this.player.containerMenu.containerId == packet.getContainerId() && this.player.containerMenu.stillValid(this.player)) { // CraftBukkit
+@@ -3404,6 +3417,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+         }
+         // Paper end - auto recipe limit
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+         this.player.resetLastActionTime();
+         if (!this.player.isSpectator() && this.player.containerMenu.containerId == packet.getContainerId() && this.player.containerMenu instanceof RecipeBookMenu) {
+             if (!this.player.containerMenu.stillValid(this.player)) {
+@@ -3452,6 +3466,7 @@ public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl
+     @Override
+     public void handleContainerButtonClick(ServerboundContainerButtonClickPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.serverLevel());
++        if (MultiPaperInventoryHandler.handleContainerEvent(this.player, packet)) return; // MultiPaper
+         if (this.player.isImmobile()) return; // CraftBukkit
+         this.player.resetLastActionTime();
+         if (this.player.containerMenu.containerId == packet.containerId() && !this.player.isSpectator()) {
+diff --git a/src/main/java/net/minecraft/stats/RecipeBook.java b/src/main/java/net/minecraft/stats/RecipeBook.java
+index 5b7fa88a150d68908c385b9279f29cdc89556a90..a9ab075fc2b42fbd9b204b1b604a5f5dde0df54c 100644
+--- a/src/main/java/net/minecraft/stats/RecipeBook.java
++++ b/src/main/java/net/minecraft/stats/RecipeBook.java
+@@ -32,6 +32,7 @@ public class RecipeBook {
+     }
+ 
+     public boolean contains(@Nullable RecipeHolder<?> recipe) {
++        if (recipe != null) return true; // MultiPaper - who cares if they use a recipe that they don't have, no point trying to sync this between servers
+         return recipe != null && this.known.contains(recipe.id());
+     }
+ 
+diff --git a/src/main/java/net/minecraft/world/entity/Entity.java b/src/main/java/net/minecraft/world/entity/Entity.java
+index 7aadcaa1785c6560eb1ce2f1179225facca47d84..2c8819064472da7048570f0bc220db7bb5b13574 100644
+--- a/src/main/java/net/minecraft/world/entity/Entity.java
++++ b/src/main/java/net/minecraft/world/entity/Entity.java
+@@ -148,6 +148,7 @@ import org.bukkit.event.vehicle.VehicleExitEvent;
+ import org.bukkit.craftbukkit.CraftWorld;
+ import org.bukkit.craftbukkit.entity.CraftEntity;
+ import org.bukkit.craftbukkit.entity.CraftPlayer;
++import puregero.multipaper.MultiPaper;
+ import org.bukkit.craftbukkit.event.CraftEventFactory;
+ import org.bukkit.craftbukkit.event.CraftPortalEvent;
+ import org.bukkit.craftbukkit.util.CraftLocation;
+@@ -1706,7 +1707,17 @@ public abstract class Entity implements SyncedDataHolder, Nameable, EntityAccess
+                         }
+ 
+                         blockposition_mutableblockposition.set(i, j, k);
+-                        BlockState iblockdata = this.level().getBlockState(blockposition_mutableblockposition);
++                        // MultiPaper start - Only check for blocks on our server (or portals)
++                        // Lazy load - Load iblockdata here only if we'll use it for the check
++                        BlockState iblockdata = this instanceof ServerPlayer ? this.level().getBlockState(blockposition_mutableblockposition) : null;
++
++                        boolean tickOnLocalServer = iblockdata != null && (iblockdata.getBlock() instanceof net.minecraft.world.level.block.NetherPortalBlock || iblockdata.getBlock() instanceof net.minecraft.world.level.block.EndPortalBlock || iblockdata.getBlock() instanceof net.minecraft.world.level.block.PowderSnowBlock || iblockdata.getBlock() instanceof net.minecraft.world.level.block.SweetBerryBushBlock || iblockdata.getBlock() instanceof net.minecraft.world.level.block.WebBlock);
++                        if (!(tickOnLocalServer && MultiPaper.isRealPlayer(this)) && MultiPaper.isChunkExternal(this.level().getChunkAt(blockposition_mutableblockposition))) continue;
++                        if (tickOnLocalServer && MultiPaper.isExternalPlayer(this)) continue;
++
++                        // Lazy load - Fully load iblockdata here since we passed the check and will use it now
++                        iblockdata = iblockdata != null ? iblockdata : this.level().getBlockState(blockposition_mutableblockposition);
++                        // MultiPaper end
+ 
+                         try {
+                             iblockdata.entityInside(this.level(), blockposition_mutableblockposition, this);
+diff --git a/src/main/java/net/minecraft/world/entity/player/Inventory.java b/src/main/java/net/minecraft/world/entity/player/Inventory.java
+index abf231e6099cda766d73e67f31234e9f4cbc9545..923ea18afc58c01095e7a1404e8e92d726b2387b 100644
+--- a/src/main/java/net/minecraft/world/entity/player/Inventory.java
++++ b/src/main/java/net/minecraft/world/entity/player/Inventory.java
+@@ -38,10 +38,12 @@ public class Inventory implements Container, Nameable {
+     public static final int NOT_FOUND_INDEX = -1;
+     public static final int[] ALL_ARMOR_SLOTS = new int[]{0, 1, 2, 3};
+     public static final int[] HELMET_SLOT_ONLY = new int[]{3};
+-    public final NonNullList<ItemStack> items;
+-    public final NonNullList<ItemStack> armor;
+-    public final NonNullList<ItemStack> offhand;
+-    public final List<NonNullList<ItemStack>> compartments;
++    // MultiPaper start - Use NonNullListFilter instead of NonNullList
++    public final puregero.multipaper.NonNullListFilter<ItemStack> items;
++    public final puregero.multipaper.NonNullListFilter<ItemStack> armor;
++    public final puregero.multipaper.NonNullListFilter<ItemStack> offhand;
++    public final List<puregero.multipaper.NonNullListFilter<ItemStack>> compartments;
++    // MultiPaper end
+     public int selected;
+     public final Player player;
+     private int timesChanged;
+@@ -95,10 +97,12 @@ public class Inventory implements Container, Nameable {
+     // CraftBukkit end
+ 
+     public Inventory(Player player) {
+-        this.items = NonNullList.withSize(36, ItemStack.EMPTY);
+-        this.armor = NonNullList.withSize(4, ItemStack.EMPTY);
+-        this.offhand = NonNullList.withSize(1, ItemStack.EMPTY);
+-        this.compartments = ImmutableList.of(this.items, this.armor, this.offhand);
++        // MultiPaper start - Filter the inventory and sync it with other server
++        this.items = puregero.multipaper.NonNullListFilter.withSize(36, ItemStack.EMPTY, player, "items");
++        this.armor = puregero.multipaper.NonNullListFilter.withSize(4, ItemStack.EMPTY, player, "armor");
++        this.offhand = puregero.multipaper.NonNullListFilter.withSize(1, ItemStack.EMPTY, player, "offhand");
++        // MultiPaper end
++        this.compartments = com.google.common.collect.ImmutableList.of(this.items, this.armor, this.offhand);
+         this.player = player;
+     }
+ 
+@@ -423,6 +427,7 @@ public class Inventory implements Container, Nameable {
+             }
+         }
+ 
++        if (list != null) ((puregero.multipaper.NonNullListFilter<ItemStack>) list).markDirty(slot); // MultiPaper
+         return list != null && !((ItemStack) list.get(slot)).isEmpty() ? ContainerHelper.removeItem(list, slot, amount) : ItemStack.EMPTY;
+     }
+ 
+diff --git a/src/main/java/net/minecraft/world/item/ItemStack.java b/src/main/java/net/minecraft/world/item/ItemStack.java
+index 9d9af312037c96c7773a456e37e6425f7004e73a..7dcdc7e3351429e503ebae0a509b17f4bcf1b27a 100644
+--- a/src/main/java/net/minecraft/world/item/ItemStack.java
++++ b/src/main/java/net/minecraft/world/item/ItemStack.java
+@@ -218,6 +218,18 @@ public final class ItemStack implements DataComponentHolder {
+     public static final StreamCodec<RegistryFriendlyByteBuf, List<ItemStack>> LIST_STREAM_CODEC = ItemStack.STREAM_CODEC.apply(ByteBufCodecs.collection(NonNullList::createWithCapacity));
+     private static final Logger LOGGER = LogUtils.getLogger();
+     public static final ItemStack EMPTY = new ItemStack((Void) null);
++    // MultiPaper start
++    public boolean dirty = true;
++    static { EMPTY.dirty = false; }
++    @Nullable
++    public puregero.multipaper.NonNullListFilter<? extends ItemStack> listeningComponent;
++
++    public void markDirty() {
++        if (this == EMPTY || listeningComponent == null || listeningComponent.markDirty()) {
++            dirty = true;
++        }
++    }
++    // MultiPaper end
+     private static final Component DISABLED_ITEM_TOOLTIP = Component.translatable("item.disabled").withStyle(ChatFormatting.RED);
+     private int count;
+     private int popTime;
+diff --git a/src/main/java/puregero/multipaper/ExternalPlayer.java b/src/main/java/puregero/multipaper/ExternalPlayer.java
+index f66745e78c003fbdc72eae0b0f19374c1371a0ad..dd1ebd77e0b148a2fdb920eff73417d7b40079df 100644
+--- a/src/main/java/puregero/multipaper/ExternalPlayer.java
++++ b/src/main/java/puregero/multipaper/ExternalPlayer.java
+@@ -37,7 +37,9 @@ public class ExternalPlayer extends ServerPlayer {
+ 
+     public ExternalPlayer(ExternalServerConnection externalServerConnection, GameProfile gameProfile, String world, double x, double y, double z, float yaw, float pitch, GameType gamemode, InetSocketAddress address, CompoundTag saveData) {
+         super(((CraftServer) Bukkit.getServer()).getServer(), ((CraftWorld) Bukkit.getWorld(world)).getHandle(), gameProfile);
++        MultiPaperInventoryHandler.updatingInventory = true;
+         this.load(saveData);
++        MultiPaperInventoryHandler.updatingInventory = false;
+         this.externalServerConnection = externalServerConnection;
+         this.address = address;
+         this.isRealPlayer = true;
+@@ -102,4 +104,9 @@ public class ExternalPlayer extends ServerPlayer {
+     public boolean broadcastToPlayer(ServerPlayer spectator) {
+         return false;
+     }
++
++    @Override
++    public void checkInsideBlocks() {
++        super.checkInsideBlocks();
++    }
+ }
+diff --git a/src/main/java/puregero/multipaper/MultiPaper.java b/src/main/java/puregero/multipaper/MultiPaper.java
+index 94c4c36259e30dcef46a0580fd7bd1ac84659dba..6c059fb9bbe9cda4d8426355c645523525aef6d4 100644
+--- a/src/main/java/puregero/multipaper/MultiPaper.java
++++ b/src/main/java/puregero/multipaper/MultiPaper.java
+@@ -76,6 +76,8 @@ public class MultiPaper {
+                     externalPlayer.containerUpdateDelay = externalPlayer.level().paperConfig().tickRates.containerUpdate;
+                 }
+                 // Copied from Paper end
++
++                externalPlayer.checkInsideBlocks();
+             }
+         }
+ 
+@@ -112,6 +114,8 @@ public class MultiPaper {
+         });
+ 
+         MultiPaperAckBlockChangesHandler.tick();
++
++        MultiPaperInventoryHandler.tick();
+     }
+ 
+     public static void sendTickTime(long time, double tps) {
+diff --git a/src/main/java/puregero/multipaper/MultiPaperInventoryHandler.java b/src/main/java/puregero/multipaper/MultiPaperInventoryHandler.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e3363d7f1997ecd7348e2007a45f33cd2c36b7b
+--- /dev/null
++++ b/src/main/java/puregero/multipaper/MultiPaperInventoryHandler.java
+@@ -0,0 +1,401 @@
++package puregero.multipaper;
++
++import io.papermc.paper.chunk.system.scheduling.NewChunkHolder;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.nbt.ListTag;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
++import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
++import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
++import net.minecraft.network.protocol.game.ClientboundSetCarriedItemPacket;
++import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
++import net.minecraft.network.protocol.game.ServerGamePacketListener;
++import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
++import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
++import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
++import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.entity.RelativeMovement;
++import net.minecraft.world.entity.item.ItemEntity;
++import net.minecraft.world.inventory.AbstractContainerMenu;
++import net.minecraft.world.inventory.Slot;
++import net.minecraft.world.item.BucketItem;
++import net.minecraft.world.item.EnderEyeItem;
++import net.minecraft.world.item.FishingRodItem;
++import net.minecraft.world.item.ItemStack;
++import net.minecraft.world.phys.AABB;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import puregero.multipaper.externalserverprotocol.PlayerActionPacket;
++import puregero.multipaper.externalserverprotocol.PlayerInventoryUpdatePacket;
++
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.UUID;
++import java.util.function.BiConsumer;
++import java.util.function.Supplier;
++
++public class MultiPaperInventoryHandler {
++
++    private static final Logger LOGGER = LogManager.getLogger(MultiPaperInventoryHandler.class.getSimpleName());
++
++    public static boolean updatingInventory = false;
++    private static final HashMap<UUID, ArrayList<AwaitingTeleport>> awaitingTeleports = new HashMap<>();
++    private static final Set<NonNullListFilter<? extends ItemStack>> modifiedInventories = new LinkedHashSet<>();
++
++    public static boolean handlePacketFromExternalServer(ExternalServer server, ServerPlayer player, Packet<?> packet) {
++        if (packet instanceof ClientboundOpenScreenPacket) {
++            // An external server has requested to open a window on a player
++            player.openContainer = server;
++        } else if (packet instanceof ClientboundContainerClosePacket) {
++            // An external server has requested to close the open window on a player
++            if (player.openContainer == server) {
++                player.openContainer = null;
++            }
++        } else if (packet instanceof ClientboundSetCarriedItemPacket setCarriedItemPacket) {
++            // An external server is changing the selected item in the hotbar
++            player.getInventory().selected = setCarriedItemPacket.getSlot();
++        } else if (packet instanceof ClientboundSetExperiencePacket setExperiencePacket) {
++            // An external server is changing the player's experience level
++            player.experienceLevel = setExperiencePacket.getExperienceLevel();
++            player.experienceProgress = setExperiencePacket.getExperienceProgress();
++            player.totalExperience = setExperiencePacket.getTotalExperience();
++        } else if (packet instanceof ClientboundPlayerPositionPacket playerPositionPacket) {
++            // An external server is teleporting the player
++            double x = playerPositionPacket.getRelativeArguments().contains(RelativeMovement.X) ? player.getX() : 0.0D;
++            double y = playerPositionPacket.getRelativeArguments().contains(RelativeMovement.Y) ? player.getY() : 0.0D;
++            double z = playerPositionPacket.getRelativeArguments().contains(RelativeMovement.Z) ? player.getZ() : 0.0D;
++            float yaw = playerPositionPacket.getRelativeArguments().contains(RelativeMovement.Y_ROT) ? player.getYRot() : 0.0F;
++            float pitch = playerPositionPacket.getRelativeArguments().contains(RelativeMovement.X_ROT) ? player.getXRot() : 0.0F;
++            player.connection.teleport(x + playerPositionPacket.getX(), y + playerPositionPacket.getY(), z + playerPositionPacket.getZ(), yaw + playerPositionPacket.getYRot(), pitch + playerPositionPacket.getXRot(), playerPositionPacket.getRelativeArguments());
++            server.getConnection().send(new PlayerActionPacket(player, new ServerboundAcceptTeleportationPacket(playerPositionPacket.getId())));
++            return true;
++        }
++
++        return false;
++    }
++
++    /**
++     * Returns true if the even should be cancelled
++     */
++    public static boolean handleInteractEvent(ServerPlayer player, ServerboundUseItemOnPacket packet) {
++        NewChunkHolder newChunkHolder = MultiPaper.getChunkHolder((ServerLevel) player.level(), packet.getHitResult().getBlockPos());
++        ItemStack item = player.getItemInHand(packet.getHand());
++        if (MultiPaper.isChunkExternal(newChunkHolder) && !(item.getItem() instanceof BucketItem)) {
++            newChunkHolder.externalOwner.getConnection().send(new PlayerActionPacket(player, packet));
++            return true;
++        }
++
++        return false;
++    }
++
++    /**
++     * Returns true if the even should be cancelled
++     */
++    public static boolean handleUseItemEvent(ServerPlayer player, ServerboundUseItemPacket packet) {
++        NewChunkHolder newChunkHolder = MultiPaper.getChunkHolder((ServerLevel) player.level(), player.blockPosition());
++        ItemStack item = player.getItemInHand(packet.getHand());
++        if (MultiPaper.isChunkExternal(newChunkHolder) && item.getItem() instanceof EnderEyeItem) {
++            newChunkHolder.externalOwner.getConnection().send(new PlayerActionPacket(player, packet));
++            return true;
++        } else if (MultiPaper.isRealPlayer(player) && item.getItem() instanceof FishingRodItem) {
++            MultiPaper.broadcastPacketToExternalServers(newChunkHolder.externalSubscribers, () -> new PlayerActionPacket(player, packet));
++        }
++
++        return false;
++    }
++
++    /**
++     * Returns true if the even should be cancelled
++     */
++    public static boolean handleContainerEvent(ServerPlayer player, Packet<ServerGamePacketListener> containerPacket) {
++        if (player.openContainer != null) {
++            player.openContainer.getConnection().send(new PlayerActionPacket(player, containerPacket));
++
++            if (containerPacket instanceof ServerboundContainerClosePacket) {
++                player.openContainer = null;
++            }
++
++            return true;
++        }
++
++        return false;
++    }
++
++    public static void updateInventory(ServerPlayer player, String name, int slot, ItemStack replacingItem, ItemStack item) {
++        updatingInventory = true; // Don't let these changes mark the inventories as dirty
++        NonNullListFilter<ItemStack> component = null;
++        switch (name) {
++            case "items" -> component = player.getInventory().items;
++            case "armor" -> component = player.getInventory().armor;
++            case "offhand" -> component = player.getInventory().offhand;
++            default -> throw new IllegalArgumentException("Unknown inventory component of " + name);
++        }
++
++        item.dirty = false;
++
++        if (component != null) {
++            ItemStack lastItem = component.lastItems.get(slot);
++            ItemStack currentItem = component.get(slot);
++
++            if (!ItemStack.matches(lastItem, currentItem) && !MultiPaper.isRealPlayer(player)) {
++                // Our changes haven't been sent yet, send them
++                broadcastComponentChanges(player, component);
++            }
++
++            if (MultiPaper.isRealPlayer(player) && replacingItem != null && !ItemStack.matches(replacingItem, currentItem)) {
++                // The expected item doesn't match, a merge is required
++                item.dirty = true; component.isDirty = true; // Resend the item afterwards to sync the other servers
++                if (isSameItemSameTagIgnoringDurability(replacingItem, item)) {
++                    if (replacingItem.getCount() != item.getCount()) {
++                        int countDiff = item.getCount() - replacingItem.getCount();
++                        if (countDiff > 0) {
++                            item.setCount(countDiff);
++                            addItem(item, player);
++                        } else {
++                            LOGGER.warn(player.getScoreboardName() + ": An external server tried to remove " + countDiff + " items from " + replacingItem + ", but that item is now a " + currentItem + ". Searching for duped items to remove...");
++                            item.setCount(-countDiff);
++                            removeNearbyItems(player, item);
++                        }
++                    } else if (replacingItem.getDamageValue() != item.getDamageValue()) {
++                        int damageDiff = item.getDamageValue() - replacingItem.getDamageValue();
++                        if (isSameItemSameTagIgnoringDurability(currentItem, item)) {
++                            currentItem.setDamageValue(currentItem.getDamageValue() + damageDiff);
++                        }
++                    } else {
++                        LOGGER.warn(player.getScoreboardName() + ": Trying to merge the same item same tags, but neither the count nor the durability is different. " + item + " and " + replacingItem + " and " + currentItem);
++                    }
++                } else {
++                    addItem(item, player);
++                    if (!replacingItem.isEmpty()) {
++                        // The item has probably duplicated, try to find one of the copies and remove it
++                        LOGGER.info(player.getScoreboardName() + ": An external server tried to replace " + replacingItem + " with a " + item + ", but that item is now a " + currentItem + ". Searching for duped items to remove...");
++                        removeNearbyItems(player, replacingItem);
++                    }
++                }
++            } else {
++                component.set(slot, item);
++                component.lastItems.set(slot, item.copy()); // We don't need to do this if it's our player
++            }
++        }
++
++        updatingInventory = false;
++    }
++
++    private static void addItem(ItemStack itemStack, ServerPlayer player) {
++        if (player.isDeadOrDying() || !player.getInventory().add(itemStack)) {
++            player.drop(itemStack, false);
++        }
++    }
++
++    private static void removeNearbyItems(ServerPlayer player, ItemStack itemToRemove) {
++        for (Runnable runnable : new Runnable[]{
++                () -> removeFromContainerMenu(player, itemToRemove, player.containerMenu),
++                () -> removeFromContainerMenu(player, itemToRemove, player.inventoryMenu),
++                () -> removeFromInventory(player, itemToRemove, player.getInventory().compartments),
++                () -> removeFromItemEntities(player, itemToRemove),
++        }) {
++            runnable.run();
++
++            if (itemToRemove.isEmpty()) {
++                return;
++            }
++        }
++    }
++
++    private static void removeFromContainerMenu(ServerPlayer player, ItemStack itemToRemove, AbstractContainerMenu containerMenu) {
++        removeItems(player, itemToRemove, containerMenu::getCarried, (item, count) -> {
++            LOGGER.info("{}: Removing {}x of {} from cursor in open menu {}", player.getScoreboardName(), count, itemToRemove, containerMenu.getClass().getSimpleName());
++            containerMenu.setCarried(item);
++        });
++
++        for (Slot slot : containerMenu.slots) {
++            removeItems(player, itemToRemove, slot::getItem, (item, count) -> {
++                LOGGER.info("{}: Removing {}x of {} from open menu {}", player.getScoreboardName(), count, itemToRemove, containerMenu.getClass().getSimpleName());
++                slot.set(item);
++            });
++        }
++    }
++
++    private static void removeFromInventory(ServerPlayer player, ItemStack itemToRemove, List<NonNullListFilter<ItemStack>> compartments) {
++        for (List<ItemStack> compartment : compartments) {
++            for (int slot = 0; slot < compartment.size(); slot++) {
++                final int finalSlot = slot;
++                removeItems(player, itemToRemove, () -> compartment.get(finalSlot), (item, count) -> {
++                    LOGGER.info("{}: Removing {}x of {} from inventory", player.getScoreboardName(), count, itemToRemove);
++                    compartment.set(finalSlot, item);
++                });
++            }
++        }
++    }
++
++    private static void removeFromItemEntities(ServerPlayer player, ItemStack itemToRemove) {
++        for (ItemEntity entity : player.level().getEntitiesOfClass(ItemEntity.class, AABB.ofSize(player.position(), 16, 16, 16))) {
++            removeItems(player, itemToRemove, entity::getItem, (item, count) -> {
++                LOGGER.info("{}: Removing {}x of {} from item entity at {}", player.getScoreboardName(), count, itemToRemove, entity.position());
++                entity.remove(Entity.RemovalReason.DISCARDED); // Remove the item entity to update the item inside
++                if (!item.isEmpty()) {
++                    entity.spawnAtLocation(item, 0); // Respawn it if it has items left
++                }
++            });
++        }
++    }
++
++    private static void removeItems(ServerPlayer player, ItemStack itemToRemove, Supplier<ItemStack> getter, BiConsumer<ItemStack, Integer> setter) {
++        if (itemToRemove.isEmpty()) return;
++
++        ItemStack item = getter.get();
++        if (ItemStack.isSameItemSameTags(item, itemToRemove)) {
++            int itemCount = item.getCount();
++            if (item.getCount() < itemToRemove.getCount()) {
++                item.setCount(0);
++                setter.accept(ItemStack.EMPTY, itemCount);
++                itemToRemove.setCount(itemToRemove.getCount() - itemCount);
++            } else {
++                item.setCount(itemCount - itemToRemove.getCount());
++                setter.accept(item, itemToRemove.getCount());
++                itemToRemove.setCount(0);
++            }
++        }
++    }
++
++    private static boolean isSameItemSameTagIgnoringDurability(ItemStack left, ItemStack right) {
++        boolean hasLeftDurability = false;
++        boolean hasRightDurability = false;
++        int leftDurability = left.getDamageValue();
++        int rightDurability = right.getDamageValue();
++
++        if (left.getTag() != null && left.getTag().contains("Damage")) {
++            hasLeftDurability = true;
++            left.getTag().remove("Damage");
++        }
++        if (right.getTag() != null) {
++            hasRightDurability = true;
++            right.getTag().remove("Damage");
++        }
++
++        boolean result = ItemStack.isSameItemSameTags(left, right);
++
++        if (hasLeftDurability) left.getTag().putInt("Damage", leftDurability);
++        if (hasRightDurability) right.getTag().putInt("Damage", rightDurability);
++
++        return result;
++    }
++
++    /**
++     * Returns true if the changes to the inventory component should be marked as dirty.
++     */
++    public static <E extends ItemStack> boolean markDirty(NonNullListFilter<E> inventoryComponent) {
++        if ( !io.papermc.paper.util.TickThread.isTickThread() ) {
++            LOGGER.warn("Asynchronous inventory modification. This is unsafe and will eventually cause an issue.", new IllegalStateException("Async access"));
++        }
++
++        if (!updatingInventory) {
++            modifiedInventories.add(inventoryComponent);
++            return true;
++        }
++
++        return false;
++    }
++
++    /**
++     * Runs at the end of a vanilla tick. Ie any changes to the inventory made in the tick will instantly be updated
++     * to other servers without a tick delay.
++     */
++    public static void tick() {
++        for (NonNullListFilter<? extends ItemStack> inventoryComponent : modifiedInventories) {
++            if (inventoryComponent.player instanceof ServerPlayer player) {
++                broadcastComponentChanges(player, inventoryComponent);
++            }
++        }
++        modifiedInventories.clear();
++    }
++
++    public static void broadcastComponentChanges(ServerPlayer player, NonNullListFilter<? extends ItemStack> inventoryComponent) {
++        if (inventoryComponent.isDirty) {
++            inventoryComponent.isDirty = false;
++            ListTag items = new ListTag();
++            for (int i = 0; i < inventoryComponent.size(); i++) {
++                if (inventoryComponent.dirty[i] || inventoryComponent.get(i).dirty) {
++                    CompoundTag item = new CompoundTag();
++                    item.putInt("Slot", i);
++                    inventoryComponent.get(i).save(item);
++                    items.add(item);
++
++                    if (!MultiPaper.isRealPlayer(player)) {
++                        CompoundTag replacingItem = new CompoundTag();
++                        inventoryComponent.lastItems.get(i).save(replacingItem);
++                        item.put("Replacing", replacingItem);
++                    }
++
++                    inventoryComponent.dirty[i] = false;
++                    inventoryComponent.get(i).dirty = false;
++                    inventoryComponent.lastItems.set(i, inventoryComponent.get(i).copy());
++                }
++            }
++
++            if (!items.isEmpty()) {
++                CompoundTag itemsRoot = new CompoundTag();
++                itemsRoot.put("items", items);
++                MultiPaper.broadcastPacketToExternalServers(player, new PlayerInventoryUpdatePacket(player, inventoryComponent.name, itemsRoot));
++                player.detectEquipmentUpdates();
++            }
++        }
++    }
++
++    public static void sendFullInventoryUpdate(ServerPlayer player, ExternalServerConnection... connections) {
++        for (NonNullListFilter<? extends ItemStack> inventoryComponent : new NonNullListFilter[] {
++                player.getInventory().items,
++                player.getInventory().armor,
++                player.getInventory().offhand,
++        }) {
++            ListTag items = new ListTag();
++            for (int i = 0; i < inventoryComponent.size(); i++) {
++                CompoundTag item = new CompoundTag();
++                item.putInt("Slot", i);
++                inventoryComponent.get(i).save(item);
++                items.add(item);
++            }
++
++            CompoundTag itemsRoot = new CompoundTag();
++            itemsRoot.put("items", items);
++            for (ExternalServerConnection connection : connections) {
++                connection.send(new PlayerInventoryUpdatePacket((ServerPlayer) inventoryComponent.player, inventoryComponent.name, itemsRoot));
++            }
++        }
++    }
++
++    public static void handleAcceptTeleport(ServerPlayer player, ServerboundAcceptTeleportationPacket packet) {
++        ArrayList<AwaitingTeleport> accepts = awaitingTeleports.get(player.getUUID());
++
++        if (accepts != null) {
++            accepts.removeIf(accept -> {
++               if (accept.id == packet.getId()) {
++                   accept.externalServer.getConnection().send(new PlayerActionPacket(player, packet));
++                   return true;
++               } else {
++                   return false;
++               }
++            });
++
++            if (accepts.isEmpty()) {
++                awaitingTeleports.remove(player.getUUID());
++            }
++        }
++    }
++
++    private static class AwaitingTeleport {
++        private final ExternalServer externalServer;
++        private final int id;
++
++        private AwaitingTeleport(ExternalServer externalServer, int id) {
++            this.externalServer = externalServer;
++            this.id = id;
++        }
++    }
++}
+diff --git a/src/main/java/puregero/multipaper/NonNullListFilter.java b/src/main/java/puregero/multipaper/NonNullListFilter.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b30f0a36f799094446c120926c7435944e275d4a
+--- /dev/null
++++ b/src/main/java/puregero/multipaper/NonNullListFilter.java
+@@ -0,0 +1,74 @@
++package puregero.multipaper;
++
++import net.minecraft.core.NonNullList;
++import net.minecraft.world.entity.player.Player;
++import net.minecraft.world.item.ItemStack;
++import org.apache.commons.lang3.Validate;
++import org.jetbrains.annotations.Nullable;
++
++import java.util.Arrays;
++import java.util.List;
++
++public class NonNullListFilter<E extends ItemStack> extends NonNullList<E> {
++    public NonNullList<ItemStack> lastItems;
++    public final boolean[] dirty;
++    public final Player player;
++    public final String name;
++    public boolean isDirty;
++
++    protected NonNullListFilter(List<E> delegate, @Nullable E initialElement, Player player, String name) {
++        super(delegate, initialElement);
++        this.lastItems = NonNullList.withSize(delegate.size(), initialElement);
++        this.dirty = new boolean[delegate.size()];
++        this.player = player;
++        this.name = name;
++    }
++
++    public static <E extends ItemStack> NonNullListFilter<E> withSize(int size, E defaultValue, Player player, String name) {
++        Validate.notNull(defaultValue);
++        ItemStack[] objects = new ItemStack[size];
++        Arrays.fill(objects, defaultValue);
++        return new NonNullListFilter<E>(Arrays.asList((E[])objects), defaultValue, player, name);
++    }
++
++    public boolean markDirty() {
++        if (MultiPaperInventoryHandler.markDirty(this)) {
++            isDirty = true;
++            return true;
++        }
++        return false;
++    }
++
++    public boolean markDirty(int i) {
++        if (markDirty()) {
++            dirty[i] = true;
++            return true;
++        }
++        return false;
++    }
++
++    @Override
++    public E set(int i, E object) {
++        object.listeningComponent = this;
++        markDirty(i);
++        return super.set(i, object);
++    }
++
++    @Override
++    public void add(int i, E object) {
++        throw new UnsupportedOperationException("Assumption - you can't add to a fixed sized list");
++    }
++
++    @Override
++    public E remove(int i) {
++        throw new UnsupportedOperationException("Assumption - you can't remove from a fixed sized list");
++    }
++
++    @Override
++    public void clear() {
++        if (markDirty(0)) {
++            Arrays.fill(dirty, true);
++        }
++        super.clear();
++    }
++}
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java b/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java
+index 773d03d3500b868fd6d0ede5a8ccc63885fa4a04..f98a1fb3fd3dfe5b41ec06f066f7016b106eb75c 100644
+--- a/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java
+@@ -32,6 +32,8 @@ public class ExternalServerPacketSerializer {
+         addPacket(DeopPlayerPacket.class, DeopPlayerPacket::new);
+         addPacket(WhiteListPlayerPacket.class, WhiteListPlayerPacket::new);
+         addPacket(RemoveWhiteListedPlayerPacket.class, RemoveWhiteListedPlayerPacket::new);
++        addPacket(PlayerActionPacket.class, PlayerActionPacket::new);
++        addPacket(PlayerInventoryUpdatePacket.class, PlayerInventoryUpdatePacket::new);
+     }
+ 
+     private static void addPacket(Class<? extends ExternalServerPacket> clazz, Function<FriendlyByteBuf, ExternalServerPacket> deserializer) {
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/PlayerActionPacket.java b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerActionPacket.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e51741d76d2d209accb673f8043ed99010125a3
+--- /dev/null
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerActionPacket.java
+@@ -0,0 +1,63 @@
++package puregero.multipaper.externalserverprotocol;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import net.minecraft.network.ConnectionProtocol;
++import net.minecraft.network.FriendlyByteBuf;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.PacketFlow;
++import net.minecraft.network.protocol.game.ServerGamePacketListener;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerPlayer;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import puregero.multipaper.ExternalServerConnection;
++
++import java.util.UUID;
++
++public class PlayerActionPacket extends ExternalServerPacket {
++
++    private static final Logger LOGGER = LogManager.getLogger(PlayerActionPacket.class.getSimpleName());
++
++    private final UUID uuid;
++    private final Packet<ServerGamePacketListener> action;
++
++    public PlayerActionPacket(ServerPlayer player, Packet<ServerGamePacketListener> action) {
++        this.uuid = player.getUUID();
++        this.action = action;
++    }
++
++    public PlayerActionPacket(FriendlyByteBuf in) {
++        uuid = in.readUUID();
++
++        ByteBuf buf = Unpooled.wrappedBuffer(in.readByteArray());
++        FriendlyByteBuf friendlyByteBuf = new FriendlyByteBuf(buf);
++        int packetId = friendlyByteBuf.readVarInt();
++        action = (Packet<ServerGamePacketListener>) ConnectionProtocol.PLAY.createPacket(PacketFlow.SERVERBOUND, packetId, friendlyByteBuf);
++    }
++
++    @Override
++    public void write(FriendlyByteBuf out) {
++        out.writeUUID(uuid);
++
++        ConnectionProtocol protocol = ConnectionProtocol.getProtocolForPacket(action);
++        Integer id = protocol.getPacketId(PacketFlow.SERVERBOUND, action);
++        ByteBuf buf = Unpooled.buffer();
++        FriendlyByteBuf friendlyByteBuf = new FriendlyByteBuf(buf);
++        friendlyByteBuf.writeVarInt(id);
++        action.write(friendlyByteBuf);
++        out.writeByteArray(buf.array());
++    }
++
++    @Override
++    public void handle(ExternalServerConnection connection) {
++        ServerPlayer player = MinecraftServer.getServer().getPlayerList().getPlayer(uuid);
++
++        if (player == null) {
++            LOGGER.warn("Tried to run an action on a non-existent player with uuid " + uuid);
++            return;
++        }
++
++        player.server.execute(() -> action.handle(player.connection));
++    }
++}
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java
+index e02a78c011758cdce9eb25e3b3d5b7838ec78d0a..48974acf4937443adcb5d0163c4724d8df1cfc2c 100644
+--- a/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java
+@@ -3,6 +3,7 @@ package puregero.multipaper.externalserverprotocol;
+ import com.mojang.authlib.GameProfile;
+ import net.minecraft.nbt.CompoundTag;
+ import net.minecraft.network.FriendlyByteBuf;
++import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.world.level.GameType;
+@@ -12,6 +13,7 @@ import org.bukkit.event.player.PlayerKickEvent;
+ import puregero.multipaper.ExternalPlayer;
+ import puregero.multipaper.ExternalServerConnection;
+ import puregero.multipaper.MultiPaper;
++import puregero.multipaper.MultiPaperInventoryHandler;
+ 
+ import java.net.InetAddress;
+ import java.net.InetSocketAddress;
+@@ -119,5 +121,6 @@ public class PlayerCreatePacket extends ExternalServerPacket {
+         }
+ 
+         send(new PlayerCreatePacket(player, player.saveWithoutId(new CompoundTag())), connections);
++        send(new PlayerActionPacket(player, new ServerboundSetCarriedItemPacket(player.getInventory().selected)), connections);
+     }
+ }
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/PlayerInventoryUpdatePacket.java b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerInventoryUpdatePacket.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3517b13be13c729056c6e05291b7f95312476432
+--- /dev/null
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerInventoryUpdatePacket.java
+@@ -0,0 +1,82 @@
++package puregero.multipaper.externalserverprotocol;
++
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.nbt.ListTag;
++import net.minecraft.nbt.Tag;
++import net.minecraft.network.FriendlyByteBuf;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.item.ItemStack;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import puregero.multipaper.ExternalServerConnection;
++import puregero.multipaper.MultiPaper;
++import puregero.multipaper.MultiPaperInventoryHandler;
++
++import java.io.IOException;
++import java.util.UUID;
++
++public class PlayerInventoryUpdatePacket extends ExternalServerPacket {
++
++    private static final Logger LOGGER = LogManager.getLogger(PlayerInventoryUpdatePacket.class.getSimpleName());
++
++    private final UUID uuid;
++    private final String component;
++    private final CompoundTag tag;
++
++    public PlayerInventoryUpdatePacket(ServerPlayer player, String component, CompoundTag tag) {
++        this.uuid = player.getUUID();
++        this.component = component;
++        this.tag = tag;
++    }
++
++    public PlayerInventoryUpdatePacket(FriendlyByteBuf in) {
++        uuid = in.readUUID();
++        component = in.readUtf();
++
++        try {
++            tag = MultiPaper.nbtFromBytes(in.readByteArray());
++        } catch (IOException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
++    @Override
++    public void write(FriendlyByteBuf out) {
++        out.writeUUID(uuid);
++        out.writeUtf(component);
++
++        try {
++            out.writeByteArray(MultiPaper.nbtToBytes(tag));
++        } catch (IOException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
++    @Override
++    public void handle(ExternalServerConnection connection) {
++        MultiPaper.runSync(() -> {
++            ServerPlayer player = MinecraftServer.getServer().getPlayerList().getPlayer(uuid);
++
++            if (player == null) {
++                LOGGER.warn("Tried to update the inventory of a non-existent player uuid " + uuid);
++                return;
++            }
++
++            ListTag items = tag.getList("items", Tag.TAG_COMPOUND);
++            items.forEach(i -> {
++                CompoundTag item = (CompoundTag) i;
++                ItemStack itemStack = ItemStack.of(item);
++
++                ItemStack replacingItem = null;
++                if (item.contains("Replacing")) {
++                    replacingItem = ItemStack.of(item.getCompound("Replacing"));
++                }
++
++                MultiPaperInventoryHandler.updateInventory(player, component, item.getInt("Slot"), replacingItem, itemStack);
++            });
++
++            player.detectEquipmentUpdates();
++        });
++    }
++}
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/SendPacketPacket.java b/src/main/java/puregero/multipaper/externalserverprotocol/SendPacketPacket.java
+index 67fa85df260e2350824ef5f718cd4f89703e44c8..80478852fb8998698d3bb26a2ba20119755ea4dc 100644
+--- a/src/main/java/puregero/multipaper/externalserverprotocol/SendPacketPacket.java
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/SendPacketPacket.java
+@@ -6,11 +6,14 @@ import net.minecraft.network.ConnectionProtocol;
+ import net.minecraft.network.FriendlyByteBuf;
+ import net.minecraft.network.protocol.Packet;
+ import net.minecraft.network.protocol.PacketFlow;
++import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerPlayer;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import puregero.multipaper.ExternalServerConnection;
++import puregero.multipaper.MultiPaper;
++import puregero.multipaper.MultiPaperInventoryHandler;
+ 
+ import java.util.List;
+ import java.util.UUID;
+@@ -67,7 +70,11 @@ public class SendPacketPacket extends ExternalServerPacket {
+ 
+     @Override
+     public void handle(ExternalServerConnection connection) {
+-        doHandle(connection);
++        if (packet instanceof ClientboundPlayerPositionPacket) {
++            MultiPaper.runSync(() -> doHandle(connection));
++        } else {
++            doHandle(connection);
++        }
+     }
+ 
+     public void doHandle(ExternalServerConnection connection) {
+@@ -79,6 +86,10 @@ public class SendPacketPacket extends ExternalServerPacket {
+                 continue;
+             }
+ 
++            if (MultiPaperInventoryHandler.handlePacketFromExternalServer(connection.externalServer, player, packet)) {
++                continue;
++            }
++
+             player.connection.send(packet);
+         }
+     }
