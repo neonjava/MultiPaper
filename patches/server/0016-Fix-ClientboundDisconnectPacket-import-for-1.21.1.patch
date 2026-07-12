@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: neonjava <neonjavadev@gmail.com>
+Date: Sun, 12 Jul 2026 16:00:01 +0530
+Subject: [PATCH] Fix ClientboundDisconnectPacket import for 1.21.1
+
+
+diff --git a/src/main/java/net/minecraft/server/players/PlayerList.java b/src/main/java/net/minecraft/server/players/PlayerList.java
+index 8a81ecf732f48f945b7d391d57e7e542663bef63..5ccdfa0143d52307844f654633ef4fbc937c7eaa 100644
+--- a/src/main/java/net/minecraft/server/players/PlayerList.java
++++ b/src/main/java/net/minecraft/server/players/PlayerList.java
+@@ -90,7 +90,7 @@ import puregero.multipaper.externalserverprotocol.PlayerChangeDimensionPacket;
+ import puregero.multipaper.externalserverprotocol.PlayerCreatePacket;
+ import puregero.multipaper.externalserverprotocol.PlayerRemovePacket;
+ import puregero.multipaper.externalserverprotocol.PlayerRespawnPacket;
+-import net.minecraft.network.protocol.game.ClientboundDisconnectPacket;
++import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
+ import net.minecraft.tags.TagNetworkSerialization;
+ import net.minecraft.world.effect.MobEffectInstance;
+ import net.minecraft.world.entity.Entity;
