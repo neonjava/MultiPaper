@@ -57,23 +57,23 @@ subprojects {
 }
 
 paperweight {
-    serverProject.set(project(":multipaper-server"))
+    serverProject = project(":multipaper-server")
 
-    remapRepo.set("https://repo.papermc.io/repository/maven-public/")
-    decompileRepo.set("https://repo.papermc.io/repository/maven-public/")
+    remapRepo = "https://repo.papermc.io/repository/maven-public/"
+    decompileRepo = "https://repo.papermc.io/repository/maven-public/"
 
     useStandardUpstream("Purpur") {
-        url.set(github("PurpurMC", "Purpur"))
-        ref.set(providers.gradleProperty("purpurRef"))
+        url = github("PurpurMC", "Purpur")
+        ref = providers.gradleProperty("purpurRef")
         
         withStandardPatcher {
-            apiSourceDirPath.set("Purpur-API") 
-            apiPatchDir.set(layout.projectDirectory.dir("patches/api"))
-            apiOutputDir.set(layout.projectDirectory.dir("MultiPaper-API"))
+            apiSourceDirPath = "Purpur-API"
+            apiPatchDir = layout.projectDirectory.dir("patches/api")
+            apiOutputDir = layout.projectDirectory.dir("MultiPaper-API")
 
-            serverSourceDirPath.set("Purpur-Server")
-            serverPatchDir.set(layout.projectDirectory.dir("patches/server"))
-            serverOutputDir.set(layout.projectDirectory.dir("MultiPaper-Server"))
+            serverSourceDirPath = "Purpur-Server"
+            serverPatchDir = layout.projectDirectory.dir("patches/server")
+            serverOutputDir = layout.projectDirectory.dir("MultiPaper-Server")
         }
     }
 
