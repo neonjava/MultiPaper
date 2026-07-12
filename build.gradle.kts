@@ -110,14 +110,11 @@ paperweight {
 }
 
 tasks.generateDevelopmentBundle {
-    apiCoordinates.set("puregero.multipaper:MultiPaper-API")
-    mojangApiCoordinates.set("io.papermc.paper:paper-mojangapi")
-    libraryRepositories.set(
-        listOf(
-            "https://repo.maven.apache.org/maven2/",
-            "https://repo.papermc.io/repository/maven-public/",
-            "https://jitpack.io"
-        )
+    apiCoordinates = "puregero.multipaper:MultiPaper-API"
+    libraryRepositories = listOf(
+        "https://repo.maven.apache.org/maven2/",
+        "https://repo.papermc.io/repository/maven-public/",
+        "https://jitpack.io"
     )
 }
 publishing {
