@@ -1,0 +1,236 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: neonjava <neonjavadev@gmail.com>
+Date: Sun, 12 Jul 2026 16:21:40 +0530
+Subject: [PATCH] Sync data files
+
+
+diff --git a/src/main/java/net/minecraft/world/level/saveddata/SavedData.java b/src/main/java/net/minecraft/world/level/saveddata/SavedData.java
+index 4cbb943b702baaeb8bfd2b558cc848e719cf095d..c088844a590fb145d75d0168beea735152427482 100644
+--- a/src/main/java/net/minecraft/world/level/saveddata/SavedData.java
++++ b/src/main/java/net/minecraft/world/level/saveddata/SavedData.java
+@@ -45,7 +45,7 @@ public abstract class SavedData {
+ 
+             Runnable writeRunnable = () -> { // Paper - Write SavedData IO async
+             try {
+-                NbtIo.writeCompressed(compoundTag, file.toPath());
++                puregero.multipaper.MultiPaper.writeData(file.getPath(), compoundTag); // MultiPaper
+             } catch (IOException var5) {
+                 LOGGER.error("Could not save data {}", this, var5);
+             }
+diff --git a/src/main/java/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java b/src/main/java/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
+index 769d283cd98cba829262e45020ce3936c484938a..4718acf8d997ae820e230e334839d174d20e87a4 100644
+--- a/src/main/java/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
++++ b/src/main/java/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
+@@ -352,7 +352,7 @@ public class MapItemSavedData extends SavedData {
+             --this.trackedDecorationCount;
+         }
+ 
+-        if (mapicon != null) this.setDecorationsDirty(); // Paper - only mark dirty if a change occurs
++        if (mapicon != null) this.setDecorationsDirty(mapicon.type()); // Paper - only mark dirty if a change occurs // MultiPaper
+     }
+ 
+     public static void addTargetDecoration(ItemStack stack, BlockPos pos, String id, Holder<MapDecorationType> decorationType) {
+@@ -433,7 +433,7 @@ public class MapItemSavedData extends SavedData {
+                 ++this.trackedDecorationCount;
+             }
+ 
+-            this.setDecorationsDirty();
++            this.setDecorationsDirty(type); // MultiPaper
+         }
+ 
+     }
+@@ -457,6 +457,12 @@ public class MapItemSavedData extends SavedData {
+ 
+     }
+ 
++    public void setDecorationsDirty(Holder<MapDecorationType> type) { // MultiPaper - track the decoration being made dirty
++        if (!type.is(MapDecorationTypes.FRAME) && !type.is(MapDecorationTypes.PLAYER) && !type.is(MapDecorationTypes.PLAYER_OFF_LIMITS) && !type.is(MapDecorationTypes.PLAYER_OFF_MAP)) // MultiPaper - don't save for these decorations
++        this.setDirty();
++        this.carriedBy.forEach(MapItemSavedData.HoldingPlayer::markDecorationsDirty);
++    }
++
+     public void setDecorationsDirty() {
+         this.setDirty();
+         this.carriedBy.forEach(MapItemSavedData.HoldingPlayer::markDecorationsDirty);
+diff --git a/src/main/java/net/minecraft/world/level/storage/DimensionDataStorage.java b/src/main/java/net/minecraft/world/level/storage/DimensionDataStorage.java
+index 6e23e69abd56eeda3b52a22019e1b74ae10682e7..74b7d23f60053cabf1c1e237025c60614cbad7e3 100644
+--- a/src/main/java/net/minecraft/world/level/storage/DimensionDataStorage.java
++++ b/src/main/java/net/minecraft/world/level/storage/DimensionDataStorage.java
+@@ -12,6 +12,8 @@ import java.io.PushbackInputStream;
+ import java.util.Map;
+ import java.util.function.BiFunction;
+ import javax.annotation.Nullable;
++import puregero.multipaper.MultiPaper;
++import java.io.ByteArrayInputStream;
+ import net.minecraft.SharedConstants;
+ import net.minecraft.core.HolderLookup;
+ import net.minecraft.nbt.CompoundTag;
+@@ -68,8 +70,11 @@ public class DimensionDataStorage implements java.io.Closeable { // Paper - Writ
+     private <T extends SavedData> T readSavedData(BiFunction<CompoundTag, HolderLookup.Provider, T> readFunction, DataFixTypes dataFixTypes, String id) {
+         try {
+             File file = this.getDataFile(id);
+-            if (file.exists()) {
++            if (true || file.exists()) { // MultiPaper
+                 CompoundTag compoundTag = this.readTagFromDisk(id, dataFixTypes, SharedConstants.getCurrentVersion().getDataVersion().getVersion());
++
++                if (compoundTag == null) return null; // MultiPaper
++
+                 return readFunction.apply(compoundTag.getCompound("data"), this.registries);
+             }
+         } catch (Exception var6) {
+@@ -87,10 +92,16 @@ public class DimensionDataStorage implements java.io.Closeable { // Paper - Writ
+         File file = this.getDataFile(id);
+ 
+         CompoundTag var9;
++        // MultiPaper start
++        byte[] data = MultiPaper.readData(file.getPath());
++        if (data == null || data.length == 0) {
++            return null;
++        }
+         try (
+-            InputStream inputStream = new FileInputStream(file);
++            // InputStream inputStream = new FileInputStream(file);
++            ByteArrayInputStream inputStream = new ByteArrayInputStream(data);
+             PushbackInputStream pushbackInputStream = new PushbackInputStream(new FastBufferedInputStream(inputStream), 2);
+-        ) {
++        ) { // MultiPaper end
+             CompoundTag compoundTag;
+             if (this.isGzip(pushbackInputStream)) {
+                 compoundTag = NbtIo.readCompressed(pushbackInputStream, NbtAccounter.unlimitedHeap());
+@@ -145,4 +156,10 @@ public class DimensionDataStorage implements java.io.Closeable { // Paper - Writ
+             }
+         });
+     }
++
++    // MultiPaper start - save a PersistentBase
++    public void save(String id, SavedData savedData) {
++        savedData.save(this.getDataFile(id), this.registries);
++    }
++    // MultiPaper end
+ }
+diff --git a/src/main/java/puregero/multipaper/MultiPaper.java b/src/main/java/puregero/multipaper/MultiPaper.java
+index 225b4d05126f1c3b5d4a5624e437d897a1a28804..ff9b4e0153645ea54f9855aaab25d0e3d2f46b0b 100644
+--- a/src/main/java/puregero/multipaper/MultiPaper.java
++++ b/src/main/java/puregero/multipaper/MultiPaper.java
+@@ -41,6 +41,12 @@ import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadStat
+ import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WriteStatsMessage;
+ import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadUidMessage;
+ import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WriteUidMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadDataMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WriteDataMessage;
++import net.minecraft.world.level.saveddata.maps.MapIndex;
++import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
++import net.minecraft.world.level.storage.DimensionDataStorage;
++import org.bukkit.craftbukkit.CraftWorld;
+ import java.io.DataInputStream;
+ import java.nio.charset.StandardCharsets;
+ import puregero.multipaper.mastermessagingprotocol.messages.serverbound.DataMessageReply;
+@@ -59,6 +65,8 @@ public class MultiPaper {
+         return multiPaperConnection;
+     }
+ 
++    private static long last1Seconds = System.currentTimeMillis();
++
+     public static void tick() {
+         for (ServerPlayer player : MinecraftServer.getServer().getPlayerList().players) {
+             if (player instanceof ExternalPlayer externalPlayer) {
+@@ -85,6 +93,23 @@ public class MultiPaper {
+                 level.saveIncrementally(true);
+             }
+         }
++
++        boolean hasBeen1Seconds = last1Seconds < System.currentTimeMillis() - 1000;
++
++        if (hasBeen1Seconds) last1Seconds = System.currentTimeMillis();
++
++        org.bukkit.Bukkit.getWorlds().forEach(world -> {
++            DimensionDataStorage persistentData = ((org.bukkit.craftbukkit.CraftWorld) world).getHandle().getDataStorage();
++            try {
++                persistentData.cache.forEach((key, value) -> {
++                    if (value instanceof MapIndex || (value instanceof MapItemSavedData && hasBeen1Seconds)) {
++                        persistentData.save(key, value);
++                    }
++                });
++            } catch (java.util.ConcurrentModificationException e) {
++                // Ignore - plugins doing async things (HuskSync specifically)
++            }
++        });
+     }
+ 
+     public static void sendTickTime(long time, double tps) {
+@@ -240,6 +265,22 @@ public class MultiPaper {
+         getConnection().send(new WriteUidMessage(world, data), message -> { /* do nothing */ });
+     }
+ 
++    public static byte[] readData(String path) {
++        java.io.File pathFile = new java.io.File(path);
++        String file = pathFile.getName().substring(0, pathFile.getName().length() - 4); // Remove .dat suffix
++        if (getConnection().dataCache.containsKey(file)) {
++            return getConnection().dataCache.remove(file);
++        }
++
++        return getConnection().sendAndAwaitReply(new ReadDataMessage(path), DataMessageReply.class).thenApply(message -> message.data).join();
++    }
++
++    public static void writeData(String path, CompoundTag compoundTag) throws IOException {
++        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++        NbtIo.writeCompressed(compoundTag, buffer);
++        getConnection().send(new WriteDataMessage(path, buffer.toByteArray()), message -> { /* do nothing */ });
++    }
++
+     public static byte[] nbtToBytes(CompoundTag compoundTag) throws IOException {
+         if (compoundTag == null) {
+             return new byte[0];
+diff --git a/src/main/java/puregero/multipaper/MultiPaperConnection.java b/src/main/java/puregero/multipaper/MultiPaperConnection.java
+index 541cb73f572c8f63d39e158e50541469343e3c2c..9415eec8029c8c40ce0f9df4d9845bf98857b785 100644
+--- a/src/main/java/puregero/multipaper/MultiPaperConnection.java
++++ b/src/main/java/puregero/multipaper/MultiPaperConnection.java
+@@ -23,6 +23,11 @@ import puregero.multipaper.mastermessagingprotocol.messages.serverbound.*;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.UUID;
++import java.io.File;
++import com.google.common.collect.Maps;
++import org.bukkit.Bukkit;
++import org.bukkit.World;
++import org.bukkit.craftbukkit.CraftWorld;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.TimeUnit;
+@@ -43,6 +48,7 @@ public class MultiPaperConnection extends ServerBoundMessageHandler {
+     private final Set<MasterBoundMessage> unhandledRequests = ConcurrentHashMap.newKeySet();
+     private final Map<String, ExternalServer> serversMap = new ConcurrentHashMap<>();
+     public String secret;
++    public Map<String, byte[]> dataCache = Maps.newHashMap();
+ 
+     public MultiPaperConnection() {
+         System.setProperty("multipaper.netty.threads", System.getProperty("multipaper.netty.threads", Integer.toString(Math.min(Runtime.getRuntime().availableProcessors(), 3))));
+@@ -183,4 +189,28 @@ public class MultiPaperConnection extends ServerBoundMessageHandler {
+             }
+         });
+     }
++
++    @Override
++    public void handle(DataUpdateMessage message) {
++        String pathStr = message.path;
++        File path = new File(pathStr);
++        String file = path.getName().substring(0, path.getName().length() - 4); // Remove .dat suffix
++        while (!path.getParentFile().equals(new File(".")) && !path.getParentFile().equals(path)) {
++            path = path.getParentFile();
++        }
++
++        // Clear the data from the world's data cache
++        final File finalPath = path;
++        MultiPaper.runSync(() -> {
++            World world = Bukkit.getWorld(finalPath.getName());
++            if (world == null) {
++                LOGGER.warn("Unknown world '" + finalPath.getName() + "' in path " + pathStr + " for clearData");
++                return;
++            }
++
++            if (((CraftWorld) world).getHandle().getDataStorage().cache.remove(file) != null || dataCache.containsKey(file)) {
++                dataCache.put(file, message.data);
++            }
++        });
++    }
+ }
