@@ -5,8 +5,6 @@ Subject: [PATCH] Sync player inventories between servers
 
 Port Patch 24 to 1.21.1: forward container/item interaction events for external owners, add inventory sync packet handlers, and add dirty-tracked inventory/list wrappers for cross-server state updates.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
-
 diff --git a/src/main/java/net/minecraft/server/level/ServerPlayer.java b/src/main/java/net/minecraft/server/level/ServerPlayer.java
 index 8c338279cd9c3df529dafee807f5f81159420e7e..3387d02e42b00182438b62ba5dabebded0fe7cd8 100644
 --- a/src/main/java/net/minecraft/server/level/ServerPlayer.java
