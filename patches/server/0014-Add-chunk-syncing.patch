@@ -1,0 +1,621 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: neonjava <neonjavadev@gmail.com>
+Date: Sun, 12 Jul 2026 15:57:27 +0530
+Subject: [PATCH] Add chunk syncing
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java b/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
+index 58d3d1a47e9f2423c467bb329c2d5f4b58a8b5ef..285314f704b9dab7c9f037cf152daf0f44451e60 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
++++ b/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
+@@ -1027,7 +1027,7 @@ public final class ChunkHolderManager {
+         }
+     }
+ 
+-    private void removeChunkHolder(final NewChunkHolder holder) {
++    public void removeChunkHolder(final NewChunkHolder holder) {
+         holder.markUnloaded();
+         this.autoSaveQueue.remove(holder);
+         ChunkSystem.onChunkHolderDelete(this.world, holder.vanillaChunkHolder);
+@@ -1285,6 +1285,65 @@ public final class ChunkHolderManager {
+         }
+     }
+ 
++    // MultiPaper start
++    public void unloadChunkNowNoSave(NewChunkHolder chunkHolder) {
++        ca.spottedleaf.moonrise.common.thread.TickThread.ensureTickThread("Cannot unload chunks off-main");
++
++        if (BLOCK_TICKET_UPDATES.get() == Boolean.TRUE) {
++            throw new IllegalStateException("Cannot unload chunks recursively");
++        }
++        if (this.ticketLockArea.isHeldByCurrentThread(chunkHolder.chunkX, chunkHolder.chunkZ)) {
++            throw new IllegalStateException("Cannot hold ticket update lock while calling processUnloads");
++        }
++        if (this.taskScheduler.schedulingLockArea.isHeldByCurrentThread(chunkHolder.chunkX, chunkHolder.chunkZ)) {
++            throw new IllegalStateException("Cannot hold scheduling lock while calling processUnloads");
++        }
++
++        NewChunkHolder.UnloadState state;
++
++        final ca.spottedleaf.moonrise.common.concurrent.ReentrantAreaLock.Node ticketLock = this.ticketLockArea.lock(chunkHolder.chunkX, chunkHolder.chunkZ);
++        try {
++            final ca.spottedleaf.moonrise.common.concurrent.ReentrantAreaLock.Node schedulingLock = this.taskScheduler.schedulingLockArea.lock(chunkHolder.chunkX, chunkHolder.chunkZ);
++            try {
++                state = chunkHolder.unloadStage1();
++                if (state == null) {
++                    // can unload immediately
++                    this.removeChunkHolder(chunkHolder);
++                    return;
++                }
++            } finally {
++                this.taskScheduler.schedulingLockArea.unlock(schedulingLock);
++            }
++        } finally {
++            this.ticketLockArea.unlock(ticketLock);
++        }
++
++        final Boolean before = this.blockTicketUpdates();
++        try {
++            chunkHolder.unloadStage2(state, true);
++        } finally {
++            this.unblockTicketUpdates(before);
++        }
++
++        final ca.spottedleaf.moonrise.common.concurrent.ReentrantAreaLock.Node ticketLock2 = this.ticketLockArea.lock(chunkHolder.chunkX, chunkHolder.chunkZ);
++        try {
++            final ca.spottedleaf.moonrise.common.concurrent.ReentrantAreaLock.Node schedulingLock2 = this.taskScheduler.schedulingLockArea.lock(chunkHolder.chunkX, chunkHolder.chunkZ);
++            try {
++                if (chunkHolder.unloadStage3()) {
++                    this.removeChunkHolder(chunkHolder);
++                } else {
++                    // add cooldown so the next unload check is not immediately next tick
++                    this.addTicketAtLevel(TicketType.UNLOAD_COOLDOWN, chunkHolder.chunkX, chunkHolder.chunkZ, MAX_TICKET_LEVEL, kotlin.Unit.INSTANCE);
++                }
++            } finally {
++                this.taskScheduler.schedulingLockArea.unlock(schedulingLock2);
++            }
++        } finally {
++            this.ticketLockArea.unlock(ticketLock2);
++        }
++    }
++    // MultiPaper end
++
+     private final ThreadLocal<Boolean> BLOCK_TICKET_UPDATES = ThreadLocal.withInitial(() -> {
+         return Boolean.FALSE;
+     });
+diff --git a/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java b/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+index 45eda96fd8a1acb87dbb69ce5495fec7e451416f..6c19f84d71a787dce36ffd52cb1eb8c79acd8de7 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
++++ b/src/main/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+@@ -54,6 +54,15 @@ import java.util.Objects;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.function.Consumer;
+ 
++import puregero.multipaper.ExternalServer;
++import puregero.multipaper.MultiPaper;
++import puregero.multipaper.MultiPaperChunkHandler;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.SubscribeChunkMessage;
++
++import java.util.Set;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++
+ public final class NewChunkHolder {
+ 
+     private static final Logger LOGGER = LoggerFactory.getLogger(NewChunkHolder.class);
+@@ -64,6 +73,10 @@ public final class NewChunkHolder {
+ 
+     public final ChunkTaskScheduler scheduler;
+ 
++    @javax.annotation.Nullable public ExternalServer externalOwner; // MultiPaper - Chunk owner
++    public Set<ExternalServer> externalSubscribers = ConcurrentHashMap.newKeySet(); // MultiPaper - Chunk subscribers
++    public boolean hasExternalLockRequest = false; // MultiPaper - Have we sent a request to lock this chunk?
++
+     // load/unload state
+ 
+     // chunk data state
+@@ -445,6 +458,24 @@ public final class NewChunkHolder {
+ 
+     private ChunkAccess currentChunk;
+ 
++    // MultiPaper start - listen for loading of the current chunk
++    private CompletableFuture<ChunkAccess> onCurrentChunkLoaded;
++    public CompletableFuture<ChunkAccess> onCurrentChunkLoaded() {
++        if (!this.hasGenerationTask()) {
++            if (onCurrentChunkLoaded == null || (onCurrentChunkLoaded.isDone() && onCurrentChunkLoaded.getNow(null) != currentChunk)) {
++                onCurrentChunkLoaded = CompletableFuture.completedFuture(currentChunk);
++            }
++            return onCurrentChunkLoaded;
++        }
++
++        if (onCurrentChunkLoaded == null || onCurrentChunkLoaded.isDone()) {
++            onCurrentChunkLoaded = new CompletableFuture<>();
++        }
++
++        return onCurrentChunkLoaded;
++    }
++    // MultiPaper end
++
+     // generation status state
+ 
+     /**
+@@ -880,13 +911,14 @@ public final class NewChunkHolder {
+         }
+     }
+ 
+-    void unloadStage2(final UnloadState state) {
++    void unloadStage2(final UnloadState state) { unloadStage2(state, false); } // MultiPaper - add option to not save chunk
++    void unloadStage2(final UnloadState state, boolean doNotSaveChunk) { // MultiPaper - add option to not save chunk
+         this.unloadState = null;
+         final ChunkAccess chunk = state.chunk();
+         final ChunkEntitySlices entityChunk = state.entityChunk();
+         final PoiChunk poiChunk = state.poiChunk();
+ 
+-        final boolean shouldLevelChunkNotSave = ChunkSystemFeatures.forceNoSave(chunk);
++        final boolean shouldLevelChunkNotSave = doNotSaveChunk || ChunkSystemFeatures.forceNoSave(chunk); // MultiPaper - add option to not save chunk
+ 
+         // unload chunk data
+         if (chunk != null) {
+@@ -903,10 +935,13 @@ public final class NewChunkHolder {
+             if (chunk instanceof LevelChunk levelChunk) {
+                 this.world.unload(levelChunk);
+             }
++
++            MultiPaperChunkHandler.onChunkUnload(this, chunk, entityChunk); // MultiPaper
+         }
+ 
+         // unload entity data
+         if (entityChunk != null) {
++            if (!doNotSaveChunk) // MultiPaper - add option to not save chunk
+             this.saveEntities(entityChunk, true);
+             // yes this is a hack to pass the compound tag through...
+             final CompoundTag lastEntityUnload = this.lastEntityUnload;
+@@ -1197,6 +1232,7 @@ public final class NewChunkHolder {
+                 for (int dx = -NEIGHBOUR_RADIUS; dx <= NEIGHBOUR_RADIUS; ++dx) {
+                     final NewChunkHolder holder = (dx | dz) == 0 ? this : this.scheduler.chunkHolderManager.getChunkHolder(dx + this.chunkX, dz + this.chunkZ);
+                     if (loaded) {
++                        if (holder == null) LOGGER.warn("Holder for ({},{}) is null while updating full status for ({},{})", dx + this.chunkX, dz + this.chunkZ, this.chunkX, this.chunkZ); // MultiPaper
+                         if (holder.setNeighbourFullLoaded(-dx, -dz)) {
+                             changedFullStatus.add(holder);
+                         }
+@@ -1300,6 +1336,7 @@ public final class NewChunkHolder {
+                     if (current.isOrAfter(FullChunkStatus.ENTITY_TICKING) && !pending.isOrAfter(FullChunkStatus.ENTITY_TICKING)) {
+                         this.changeEntityChunkStatus(FullChunkStatus.BLOCK_TICKING);
+                         ChunkSystem.onChunkNotEntityTicking(chunk, this.vanillaChunkHolder);
++                        if (this.hasExternalLockRequest) puregero.multipaper.MultiPaper.unlockChunk(this, chunk, this.getEntityChunk()); // MultiPaper
+                         this.updateCurrentState(FullChunkStatus.BLOCK_TICKING);
+                     }
+ 
+@@ -1492,6 +1529,7 @@ public final class NewChunkHolder {
+         final ChunkCompletion completion = new ChunkCompletion(newChunk, newStatus);
+         CHUNK_COMPLETION_ARRAY_HANDLE.setVolatile(this.chunkCompletions, newStatus.getIndex(), completion);
+         this.lastChunkCompletion = completion;
++        MultiPaper.getConnection().send(new SubscribeChunkMessage(world.getWorld().getName(), chunkX, chunkZ)); // MultiPaper - ensure we're subscribed to this chunk
+ 
+         final ChunkStatus requestedGenStatus = this.requestedGenStatus;
+ 
+@@ -1570,6 +1608,8 @@ public final class NewChunkHolder {
+ 
+             this.scheduleNeighbours(needsScheduling, scheduleList);
+         }
++
++        if (onCurrentChunkLoaded != null) onCurrentChunkLoaded.completeAsync(() -> currentChunk, world.getServer()::scheduleOnMain); // MultiPaper - listen for loading of the current chunk
+     }
+ 
+     private void scheduleNeighbours(final List<NewChunkHolder> needsScheduling, final List<ChunkProgressionTask> scheduleList) {
+@@ -1782,13 +1822,14 @@ public final class NewChunkHolder {
+         try {
+             if (unloading && ChunkSystemFeatures.supportsAsyncChunkSave()) {
+                 try {
++                    chunk.setUnsaved(false); // MultiPaper - set as saved before serializing
+                     final AsyncChunkSaveData asyncSaveData = ChunkSystemFeatures.getAsyncSaveData(this.world, chunk);
+ 
+                     final PrioritisedExecutor.PrioritisedTask task = this.scheduler.loadExecutor.createTask(new AsyncChunkSerializeTask(this.world, chunk, asyncSaveData, this));
+ 
+                     this.chunkDataUnload.task().setTask(task);
+ 
+-                    chunk.setUnsaved(false);
++                    // chunk.setUnsaved(false); // MultiPaper - set as saved before serializing
+ 
+                     task.queue();
+ 
+@@ -1800,6 +1841,7 @@ public final class NewChunkHolder {
+                 }
+             }
+ 
++            chunk.setUnsaved(false); // MultiPaper - set as saved before serializing
+             final CompoundTag save = ChunkSerializer.write(this.world, chunk);
+ 
+             if (unloading) {
+@@ -1811,7 +1853,7 @@ public final class NewChunkHolder {
+             } else {
+                 RegionFileIOThread.scheduleSave(this.world, this.chunkX, this.chunkZ, save, RegionFileIOThread.RegionFileType.CHUNK_DATA);
+             }
+-            chunk.setUnsaved(false);
++            // chunk.setUnsaved(false); // MultiPaper - set as saved before serializing
+         } catch (final Throwable thr) {
+             LOGGER.error("Failed to save chunk data (" + this.chunkX + "," + this.chunkZ + ") in world '" + WorldUtil.getWorldName(this.world) + "'", thr);
+             if (unloading && !completing) {
+diff --git a/src/main/java/ca/spottedleaf/moonrise/patches/starlight/light/StarLightInterface.java b/src/main/java/ca/spottedleaf/moonrise/patches/starlight/light/StarLightInterface.java
+index c64ab41198a5e0c7cbcbe6452af11f82f5938862..93ccabf4428a78744ba2e1453b94f6501e644a61 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/patches/starlight/light/StarLightInterface.java
++++ b/src/main/java/ca/spottedleaf/moonrise/patches/starlight/light/StarLightInterface.java
+@@ -739,7 +739,21 @@ public final class StarLightInterface {
+ 
+     public static final class ServerLightQueue extends LightQueue {
+ 
+-        private final ConcurrentLong2ReferenceChainedHashTable<ServerChunkTasks> chunkTasks = new ConcurrentLong2ReferenceChainedHashTable<>();
++        public final ConcurrentLong2ReferenceChainedHashTable<ServerChunkTasks> chunkTasks = new ConcurrentLong2ReferenceChainedHashTable<>();
++
++        // MultiPaper start - get Chunk on lighting complete
++        public java.util.concurrent.CompletableFuture<Void> getChunkFuture(final net.minecraft.world.level.ChunkPos chunkPos) {
++            ServerChunkTasks tasks = chunkTasks.get(chunkPos.longKey);
++
++            if (tasks == null) {
++                return java.util.concurrent.CompletableFuture.completedFuture(null);
++            }
++
++            java.util.concurrent.CompletableFuture<Void> future = new java.util.concurrent.CompletableFuture<>();
++            tasks.queueOrRunTask(() -> future.complete(null));
++            return future;
++        }
++        // MultiPaper end - get Chunk on lighting complete
+ 
+         public ServerLightQueue(final StarLightInterface lightInterface) {
+             super(lightInterface);
+diff --git a/src/main/java/net/minecraft/server/level/ChunkHolder.java b/src/main/java/net/minecraft/server/level/ChunkHolder.java
+index 4db96543e2072e47040bb25a9d97ea6a69c4a43d..bf07728e6dd56703359c5ea332fdc0af471d79d7 100644
+--- a/src/main/java/net/minecraft/server/level/ChunkHolder.java
++++ b/src/main/java/net/minecraft/server/level/ChunkHolder.java
+@@ -32,6 +32,12 @@ import net.minecraft.world.level.lighting.LevelLightEngine;
+ import net.minecraft.server.MinecraftServer;
+ // CraftBukkit end
+ 
++import it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet;
++import java.util.Set;
++import puregero.multipaper.MultiPaper;
++import puregero.multipaper.MultiPaperChunkHandler;
++import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
++
+ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkSystemChunkHolder { // Paper - rewrite chunk system
+ 
+     public static final ChunkResult<LevelChunk> UNLOADED_LEVEL_CHUNK = ChunkResult.error("Unloaded level chunk");
+@@ -50,6 +56,11 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+     // Paper start - rewrite chunk system
+     private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder newChunkHolder;
+ 
++    public boolean addChangesToPlayersOnly = false; // MultiPaper
++    private boolean broadcastingToOtherServersOnly = false; // MultiPaper
++    private boolean broadcastingToPlayersOnly = false; // MultiPaper
++    private @Nullable Set<BlockPos> blocksToBroadcastToPlayers = null; // MultiPaper
++
+     private static final ServerPlayer[] EMPTY_PLAYER_ARRAY = new ServerPlayer[0];
+     private final ca.spottedleaf.moonrise.common.list.ReferenceList<ServerPlayer> playersSentChunkTo = new ca.spottedleaf.moonrise.common.list.ReferenceList<>(EMPTY_PLAYER_ARRAY);
+ 
+@@ -225,7 +236,9 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+     }
+ 
+     public void blockChanged(BlockPos pos) {
+-        LevelChunk chunk = this.playersSentChunkTo.size() == 0 ? null : this.getChunkToSend(); // Paper - rewrite chunk system
++        if (addChangesToPlayersOnly && !MultiPaper.isChunkLocal(this.newChunkHolder.getCurrentChunk())) { broadcastBlockToPlayersLater(pos); return; } // MultiPaper
++        // MultiPaper start - save block changes even if there's no players, as there might be servers to send them to
++        LevelChunk chunk = this.getChunkMap().level.getChunkSource().getChunkAtIfLoadedImmediately(this.pos.x, this.pos.z); // MultiPaper - if we modify this chunk, even if it's not sent to players, we still need to send it to other servers
+ 
+         if (chunk != null) {
+             int i = this.levelHeightAccessor.getSectionIndex(pos.getY());
+@@ -237,6 +250,8 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+             }
+ 
+             this.changedBlocksPerSection[i].add(SectionPos.sectionRelativePos(pos));
++
++            if (blocksToBroadcastToPlayers != null && !blocksToBroadcastToPlayers.isEmpty()) blocksToBroadcastToPlayers.remove(pos); // MultiPaper
+         }
+     }
+ 
+@@ -265,7 +280,42 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+         }
+     }
+ 
++    // MultiPaper start
++    public void broadcastChangesToOtherServers(LevelChunk chunk) {
++        if (newChunkHolder.externalSubscribers.isEmpty()) return; // No point running this if no one's listening
++        broadcastingToOtherServersOnly = true;
++        broadcastChanges(chunk);
++        broadcastingToOtherServersOnly = false;
++    }
++
++    private void broadcastBlockToPlayersLater(BlockPos blockPos) {
++        if (blocksToBroadcastToPlayers == null) {
++            blocksToBroadcastToPlayers = new ObjectLinkedOpenHashSet<>();
++        }
++
++        if (blockPos instanceof BlockPos.MutableBlockPos) {
++            // Let's make it not mutable...
++            blockPos = new BlockPos(blockPos);
++        }
++
++        blocksToBroadcastToPlayers.add(blockPos);
++    }
++    // MultiPaper end
++
+     public void broadcastChanges(LevelChunk chunk) {
++        // MultiPaper start
++        if (!broadcastingToOtherServersOnly && blocksToBroadcastToPlayers != null && !blocksToBroadcastToPlayers.isEmpty()) {
++            // Send blocks to players that shouldn't be sent to other servers as they've already been sent to other servers
++            broadcastingToPlayersOnly = true;
++            blocksToBroadcastToPlayers.forEach(blockPos -> {
++                BlockState blockState = chunk.getLevel().getBlockState(blockPos);
++                this.broadcast(this.moonrise$getPlayers(false), new ClientboundBlockUpdatePacket(blockPos, blockState));
++                this.broadcastBlockEntityIfNeeded(this.moonrise$getPlayers(false), chunk.getLevel(), blockPos, blockState);
++            });
++            broadcastingToPlayersOnly = false;
++            blocksToBroadcastToPlayers.clear();
++        }
++        // MultiPaper end
+         if (this.hasChangedSections || !this.skyChangedLightSectionFilter.isEmpty() || !this.blockChangedLightSectionFilter.isEmpty()) {
+             Level world = chunk.getLevel();
+             List list;
+@@ -290,7 +340,7 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+ 
+                     if (shortset != null) {
+                         this.changedBlocksPerSection[i] = null;
+-                        if (!list.isEmpty()) {
++                        // if (!list.isEmpty()) { // MultiPaper - send block changes even if there's no players, as there might be servers to send them to
+                             int j = this.levelHeightAccessor.getSectionYFromSectionIndex(i);
+                             SectionPos sectionposition = SectionPos.of(chunk.getPos(), j);
+ 
+@@ -298,6 +348,7 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+                                 BlockPos blockposition = sectionposition.relativeToBlockPos(shortset.iterator().nextShort());
+                                 BlockState iblockdata = world.getBlockState(blockposition);
+ 
++                                if (broadcastingToOtherServersOnly) broadcastBlockToPlayersLater(blockposition); // MultiPaper
+                                 this.broadcast(list, new ClientboundBlockUpdatePacket(blockposition, iblockdata));
+                                 this.broadcastBlockEntityIfNeeded(list, world, blockposition, iblockdata);
+                             } else {
+@@ -308,11 +359,12 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+                                 // CraftBukkit start
+                                 List finalList = list;
+                                 packetplayoutmultiblockchange.runUpdates((blockposition1, iblockdata1) -> {
++                                    if (broadcastingToOtherServersOnly) broadcastBlockToPlayersLater(blockposition1); // MultiPaper
+                                     this.broadcastBlockEntityIfNeeded(finalList, world, blockposition1, iblockdata1);
+                                     // CraftBukkit end
+                                 });
+                             }
+-                        }
++                        // } // MultiPaper - send block changes even if there's no players, as there might be servers to send them to
+                     }
+                 }
+ 
+@@ -337,11 +389,20 @@ public class ChunkHolder extends GenerationChunkHolder implements ca.spottedleaf
+             if (packet != null) {
+                 this.broadcast(players, packet);
+             }
++
++            if(!broadcastingToPlayersOnly) MultiPaperChunkHandler.onBlockUpdate(newChunkHolder, ClientboundBlockEntityDataPacket.create(tileentity, BlockEntity::saveWithFullMetadata, false)); // MultiPaper - sync the full block with external servers
+         }
+ 
+     }
+ 
+     private void broadcast(List<ServerPlayer> players, Packet<?> packet) {
++        // MultiPaper start - Sync blocks with external servers
++        if (!broadcastingToPlayersOnly && !(packet instanceof ClientboundBlockEntityDataPacket)) { // We handle block entities separately
++            MultiPaperChunkHandler.onBlockUpdate(newChunkHolder, packet);
++        }
++        if (broadcastingToOtherServersOnly) return; // MultiPaper
++        // MultiPaper end
++
+         players.forEach((entityplayer) -> {
+             entityplayer.connection.send(packet);
+         });
+diff --git a/src/main/java/net/minecraft/server/level/ServerChunkCache.java b/src/main/java/net/minecraft/server/level/ServerChunkCache.java
+index ebe872c4643038f0c99b289d4d5afdbedd76c6ef..405f390b3bae9429b077fad1cd76569d99ee1b99 100644
+--- a/src/main/java/net/minecraft/server/level/ServerChunkCache.java
++++ b/src/main/java/net/minecraft/server/level/ServerChunkCache.java
+@@ -46,6 +46,8 @@ import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemp
+ import net.minecraft.world.level.storage.DimensionDataStorage;
+ import net.minecraft.world.level.storage.LevelStorageSource;
+ 
++import puregero.multipaper.MultiPaper;
++
+ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moonrise.patches.chunk_system.world.ChunkSystemServerChunkCache { // Paper - rewrite chunk system
+ 
+     public static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger(); // Paper
+@@ -513,6 +515,17 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                     LevelChunk chunk1 = chunkproviderserver_a.chunk;
+                     ChunkPos chunkcoordintpair = chunk1.getPos();
+ 
++                    // MultiPaper start - Don't tick this chunk if we don't own it
++                    ChunkHolder holder = chunkproviderserver_a.holder();
++                    ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder newChunkHolder = holder.moonrise$getRealChunkHolder();
++                    boolean isTicking = this.chunkMap.getDistanceManager().inEntityTickingRange(chunkcoordintpair.toLong());
++                    if (isTicking && !newChunkHolder.hasExternalLockRequest) MultiPaper.lockChunk(newChunkHolder);
++                    if (!isTicking && newChunkHolder.hasExternalLockRequest) MultiPaper.unlockChunk(newChunkHolder, chunk1, newChunkHolder.getEntityChunk());
++                    if (!puregero.multipaper.MultiPaper.isChunkLocal(chunk1)) {
++                        continue;
++                    }
++                    // MultiPaper end - Don't tick this chunk if we don't own it
++
+                     if (true && this.chunkMap.anyPlayerCloseEnoughForSpawning(chunkcoordintpair)) { // Paper - rewrite chunk system
+                         chunk1.incrementInhabitedTime(j);
+                         if (flag && (this.spawnEnemies || this.spawnFriendlies) && (!gg.pufferfish.pufferfish.PufferfishConfig.enableAsyncMobSpawning || _pufferfish_spawnCountsReady.get()) && this.level.getWorldBorder().isWithinBounds(chunkcoordintpair) && this.chunkMap.anyPlayerCloseEnoughForSpawning(chunkcoordintpair, true)) { // Spigot
+diff --git a/src/main/java/net/minecraft/server/level/ServerLevel.java b/src/main/java/net/minecraft/server/level/ServerLevel.java
+index 067b10134b087626e05596225744b905211e8b63..007ddf3fc8d507c6528e42dc4d013d3b46ce45ef 100644
+--- a/src/main/java/net/minecraft/server/level/ServerLevel.java
++++ b/src/main/java/net/minecraft/server/level/ServerLevel.java
+@@ -183,6 +183,8 @@ import org.bukkit.event.weather.LightningStrikeEvent;
+ import org.bukkit.event.world.TimeSkipEvent;
+ // CraftBukkit end
+ 
++import puregero.multipaper.MultiPaperChunkHandler;
++
+ public class ServerLevel extends Level implements WorldGenLevel, ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel, ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemLevelReader { // Paper - rewrite chunk system
+ 
+     public static final BlockPos END_SPAWN_POINT = new BlockPos(100, 50, 0);
+@@ -513,8 +515,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ca.spottedleaf.
+         // CraftBukkit end
+         this.players = Lists.newArrayList();
+         this.entityTickList = new EntityTickList();
+-        this.blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded, this.getProfilerSupplier());
+-        this.fluidTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded, this.getProfilerSupplier());
++        this.blockTicks = new LevelTicks<>(this, this::isPositionTickingWithEntitiesLoaded, this.getProfilerSupplier()); // MultiPaper - add level
++        this.fluidTicks = new LevelTicks<>(this, this::isPositionTickingWithEntitiesLoaded, this.getProfilerSupplier()); // MultiPaper - add level
+         this.pathTypesByPosCache = new PathTypeCache();
+         this.navigatingMobs = new ObjectOpenHashSet();
+         this.blockEvents = new ObjectLinkedOpenHashSet();
+@@ -1822,6 +1824,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ca.spottedleaf.
+     @Override
+     public void updateNeighborsAt(BlockPos pos, Block sourceBlock) {
+         if (captureBlockStates) { return; } // Paper - Cancel all physics during placement
++        // MultiPaper start - run neighbour updates later if we're handling block changes
++        if (puregero.multipaper.MultiPaperChunkHandler.blockUpdateChunk != null) {
++            io.papermc.paper.util.MCUtil.ensureMain(() -> this.updateNeighborsAt(pos, sourceBlock));
++        } else
++        // MultiPaper end - run neighbour updates later if we're handling block changes
+         this.neighborUpdater.updateNeighborsAtExceptFromFacing(pos, sourceBlock, (Direction) null);
+     }
+ 
+diff --git a/src/main/java/net/minecraft/world/entity/ai/village/poi/PoiManager.java b/src/main/java/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+index a908bf1dc5e821dcf6981a8c21076fb0bdc6516d..a43c849a91d8166a5e511678118f445ef1eb46a0 100644
+--- a/src/main/java/net/minecraft/world/entity/ai/village/poi/PoiManager.java
++++ b/src/main/java/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+@@ -166,6 +166,7 @@ public class PoiManager extends SectionStorage<PoiSection> implements ca.spotted
+ 
+     @Override
+     public final net.minecraft.nbt.CompoundTag moonrise$read(final int chunkX, final int chunkZ) throws java.io.IOException {
++        if (true) return puregero.multipaper.MultiPaper.readRegionFileNBT(world, "poi", new ChunkPos(chunkX, chunkZ)); // MultiPaper
+         if (!ca.spottedleaf.moonrise.patches.chunk_system.io.RegionFileIOThread.isRegionFileThread()) {
+             return ca.spottedleaf.moonrise.patches.chunk_system.io.RegionFileIOThread.loadData(
+                 this.world, chunkX, chunkZ, ca.spottedleaf.moonrise.patches.chunk_system.io.RegionFileIOThread.RegionFileType.POI_DATA,
+@@ -177,6 +178,7 @@ public class PoiManager extends SectionStorage<PoiSection> implements ca.spotted
+ 
+     @Override
+     public final void moonrise$write(final int chunkX, final int chunkZ, final net.minecraft.nbt.CompoundTag data) throws java.io.IOException {
++        if (true) puregero.multipaper.MultiPaper.writeRegionFileNBT(world, "poi", new ChunkPos(chunkX, chunkZ), data); // MultiPaper
+         if (!ca.spottedleaf.moonrise.patches.chunk_system.io.RegionFileIOThread.isRegionFileThread()) {
+             ca.spottedleaf.moonrise.patches.chunk_system.io.RegionFileIOThread.scheduleSave(this.world, chunkX, chunkZ, data, ca.spottedleaf.moonrise.patches.chunk_system.io.RegionFileIOThread.RegionFileType.POI_DATA);
+             return;
+diff --git a/src/main/java/net/minecraft/world/level/Level.java b/src/main/java/net/minecraft/world/level/Level.java
+index 5057d9d433ba002a22d22adfaf7323b2cfaee9af..e043f67eba024c0f17bd91ea5e829f82a25e73ea 100644
+--- a/src/main/java/net/minecraft/world/level/Level.java
++++ b/src/main/java/net/minecraft/world/level/Level.java
+@@ -1784,6 +1784,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     public abstract Entity getEntity(int id);
+ 
+     public void blockEntityChanged(BlockPos pos) {
++        BlockEntity tileentity = this.getBlockEntity(pos);
++        if (tileentity != null) tileentity.setChanged(); // MultiPaper - trigger setChanged on chunk if tile entity changed
+         if (this.hasChunkAt(pos)) {
+             this.getChunkAt(pos).setUnsaved(true);
+         }
+diff --git a/src/main/java/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java b/src/main/java/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
+index b35f476e26a020cf75e53a5eb488717d996a6935..c3023b116a25187b7ed329b5e5aef1f0653b7751 100644
+--- a/src/main/java/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
++++ b/src/main/java/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
+@@ -270,6 +270,7 @@ public class PistonMovingBlockEntity extends BlockEntity {
+     }
+ 
+     public void finalTick() {
++        if (this.level != null && this.level.isClientSide) return; // MultiPaper - don't run final tick on client side (this can happen when syncing between servers)
+         if (this.level != null && (this.progressO < 1.0F || this.level.isClientSide)) {
+             this.progress = 1.0F;
+             this.progressO = this.progress;
+diff --git a/src/main/java/net/minecraft/world/level/border/WorldBorder.java b/src/main/java/net/minecraft/world/level/border/WorldBorder.java
+index 04e62c54f224f7949fde9ceded208e700db55aa1..5be2c84bceb13a93580ffdff8be53941c291a791 100644
+--- a/src/main/java/net/minecraft/world/level/border/WorldBorder.java
++++ b/src/main/java/net/minecraft/world/level/border/WorldBorder.java
+@@ -16,6 +16,8 @@ import net.minecraft.world.phys.shapes.BooleanOp;
+ import net.minecraft.world.phys.shapes.Shapes;
+ import net.minecraft.world.phys.shapes.VoxelShape;
+ 
++import puregero.multipaper.MultiPaperWorldBorderHandler;
++
+ public class WorldBorder {
+ 
+     public static final double MAX_SIZE = 5.9999968E7D;
+@@ -31,8 +33,10 @@ public class WorldBorder {
+     private WorldBorder.BorderExtent extent = new WorldBorder.StaticBorderExtent(5.9999968E7D);
+     public static final WorldBorder.Settings DEFAULT_SETTINGS = new WorldBorder.Settings(0.0D, 0.0D, 0.2D, 5.0D, 5, 15, 5.9999968E7D, 0L, 0.0D);
+     public net.minecraft.server.level.ServerLevel world; // CraftBukkit
++    public puregero.multipaper.MultiPaperWorldBorderHandler multipaperWorldBorderHandler = null; // MultiPaper - world border syncing
++    public boolean ignoreMultipaperSync = false; // MultiPaper - world border syncing
+ 
+-    public WorldBorder() {}
++    public WorldBorder() { listeners.add(new MultiPaperWorldBorderHandler()); } // MultiPaper - Add our own world border listener
+ 
+     public boolean isWithinBounds(BlockPos pos) {
+         return this.isWithinBounds((double) pos.getX(), (double) pos.getZ());
+@@ -321,6 +325,7 @@ public class WorldBorder {
+     }
+ 
+     public void applySettings(WorldBorder.Settings properties) {
++        MultiPaperWorldBorderHandler.updatingWorldBorder = true; // MultiPaper
+         this.setCenter(properties.getCenterX(), properties.getCenterZ());
+         this.setDamagePerBlock(properties.getDamagePerBlock());
+         this.setDamageSafeZone(properties.getSafeZone());
+@@ -331,7 +336,7 @@ public class WorldBorder {
+         } else {
+             this.setSize(properties.getSize());
+         }
+-
++        MultiPaperWorldBorderHandler.updatingWorldBorder = false; // MultiPaper
+     }
+ 
+     private class StaticBorderExtent implements WorldBorder.BorderExtent {
+diff --git a/src/main/java/net/minecraft/world/level/chunk/ChunkAccess.java b/src/main/java/net/minecraft/world/level/chunk/ChunkAccess.java
+index 75c8125e20b70433fe9d143a3193d821043327c3..013fdd6022d992a019623807845a951d6c3e5e1d 100644
+--- a/src/main/java/net/minecraft/world/level/chunk/ChunkAccess.java
++++ b/src/main/java/net/minecraft/world/level/chunk/ChunkAccess.java
+@@ -63,7 +63,7 @@ public abstract class ChunkAccess implements BlockGetter, BiomeManager.NoiseBiom
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private static final LongSet EMPTY_REFERENCE_SET = new LongOpenHashSet();
+     protected final ShortList[] postProcessing;
+-    protected volatile boolean unsaved;
++    public volatile boolean unsaved; // MultiPaper - make public
+     private volatile boolean isLightCorrect;
+     protected final ChunkPos chunkPos; public final long coordinateKey; public final int locX; public final int locZ; // Paper - cache coordinate key
+     private long inhabitedTime;
+diff --git a/src/main/java/net/minecraft/world/level/chunk/LevelChunk.java b/src/main/java/net/minecraft/world/level/chunk/LevelChunk.java
+index a4578ae22409edb686d0bcbac8cbc1a2e1d7b988..4f0b55b21876161af36311a50614187fcd260138 100644
+--- a/src/main/java/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/src/main/java/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -83,8 +83,10 @@ public class LevelChunk extends ChunkAccess implements ca.spottedleaf.moonrise.p
+     @Nullable
+     private LevelChunk.PostLoadProcessor postLoad;
+     private final Int2ObjectMap<GameEventListenerRegistry> gameEventListenerRegistrySections;
+-    private final LevelChunkTicks<Block> blockTicks;
+-    private final LevelChunkTicks<Fluid> fluidTicks;
++    @Nullable public net.minecraft.nbt.ListTag entitiesToLoad; // MultiPaper
++    @Nullable public net.minecraft.nbt.ListTag blockEntitiesToLoad; // MultiPaper
++    public LevelChunkTicks<Block> blockTicks; // MultiPaper - make public and non-final
++    public LevelChunkTicks<Fluid> fluidTicks; // MultiPaper - make public and non-final
+ 
+     // Pufferfish start - instead of using a random every time the chunk is ticked, define when lightning strikes preemptively
+     private int lightningTick;
+@@ -599,6 +601,11 @@ public class LevelChunk extends ChunkAccess implements ca.spottedleaf.moonrise.p
+ 
+     @Override
+     public void removeBlockEntity(BlockPos pos) {
++        // MultiPaper start - allow removing a block entity on unloaded block entities
++        if (blockEntitiesToLoad != null) {
++            blockEntitiesToLoad.removeIf(tag -> pos.equals(BlockEntity.getPosFromTag((CompoundTag) tag)));
++        }
++        // MultiPaper end
+         if (this.isInLevel()) {
+             BlockEntity tileentity = (BlockEntity) this.blockEntities.remove(pos);
+ 
+@@ -668,6 +675,7 @@ public class LevelChunk extends ChunkAccess implements ca.spottedleaf.moonrise.p
+         this.loadedTicketLevel = true;
+         // Paper end
+         org.bukkit.Server server = this.level.getCraftServer();
++        puregero.multipaper.MultiPaperChunkHandler.onChunkLoad(this); // MultiPaper
+         // Paper - rewrite chunk system
+         if (server != null) {
+             /*
+@@ -722,6 +730,7 @@ public class LevelChunk extends ChunkAccess implements ca.spottedleaf.moonrise.p
+ 
+     @Override
+     public boolean isUnsaved() {
++        if (puregero.multipaper.MultiPaper.isChunkExternal(this)) return false; // MultiPaper - only save if no one else owns it
+         // Paper start - rewrite chunk system
+         final long gameTime = this.level.getGameTime();
+         if (((ca.spottedleaf.moonrise.patches.chunk_system.ticks.ChunkSystemLevelChunkTicks)this.blockTicks).moonrise$isDirty(gameTime)
