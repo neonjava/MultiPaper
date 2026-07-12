@@ -1,0 +1,330 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: neonjava <neonjavadev@gmail.com>
+Date: Sun, 12 Jul 2026 16:11:13 +0530
+Subject: [PATCH] Sync player files
+
+
+diff --git a/src/main/java/net/minecraft/server/PlayerAdvancements.java b/src/main/java/net/minecraft/server/PlayerAdvancements.java
+index 8cd8a173ac262ef974c32faf23bffa5072e99ab8..0cdea80dbfbbfcd03ddb76e1a8450160fb93604e 100644
+--- a/src/main/java/net/minecraft/server/PlayerAdvancements.java
++++ b/src/main/java/net/minecraft/server/PlayerAdvancements.java
+@@ -130,9 +130,13 @@ public class PlayerAdvancements {
+     }
+ 
+     private void load(ServerAdvancementManager advancementLoader) {
+-        if (Files.isRegularFile(this.playerSavePath, new LinkOption[0])) {
++        // MultiPaper start
++        String json = puregero.multipaper.ExternalPlayer.loadedAdvancements.remove(player.getUUID());
++        if (json == null) json = puregero.multipaper.MultiPaper.readAdvancements(player.server.storageSource.levelDirectory.path().getFileName().toString(), player.getStringUUID());
++        if ((json != null && !json.isEmpty()) || Files.isRegularFile(this.playerSavePath, new LinkOption[0])) {
++        // MultiPaper end
+             try {
+-                JsonReader jsonreader = new JsonReader(Files.newBufferedReader(this.playerSavePath, StandardCharsets.UTF_8));
++                JsonReader jsonreader = json != null && !json.isEmpty() ? new JsonReader(new java.io.StringReader(json)) : new JsonReader(Files.newBufferedReader(this.playerSavePath, StandardCharsets.UTF_8)); // MultiPaper
+ 
+                 try {
+                     jsonreader.setLenient(false);
+@@ -162,11 +166,23 @@ public class PlayerAdvancements {
+         this.registerListeners(advancementLoader);
+     }
+ 
++    // MultiPaper start - create generateJson() from save()
++    public JsonElement generateJson() {
++        return (JsonElement) this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
++    }
++
+     public void save() {
+         if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return; // Spigot
+-        JsonElement jsonelement = (JsonElement) this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
++        JsonElement jsonelement = generateJson();
++        // MultiPaper end
+ 
+         try {
++            // MultiPaper start
++            if (true) {
++                puregero.multipaper.MultiPaper.writeAdvancements(player.server.storageSource.levelDirectory.path().getFileName().toString(), player.getStringUUID(), PlayerAdvancements.GSON.toJson(jsonelement));
++                return;
++            }
++            // MultiPaper end
+             FileUtil.createDirectoriesSafe(this.playerSavePath.getParent());
+             BufferedWriter bufferedwriter = Files.newBufferedWriter(this.playerSavePath, StandardCharsets.UTF_8);
+ 
+diff --git a/src/main/java/net/minecraft/server/players/PlayerList.java b/src/main/java/net/minecraft/server/players/PlayerList.java
+index 5ccdfa0143d52307844f654633ef4fbc937c7eaa..57c57245b2035e979d49746bc35781f93a7b13e8 100644
+--- a/src/main/java/net/minecraft/server/players/PlayerList.java
++++ b/src/main/java/net/minecraft/server/players/PlayerList.java
+@@ -600,6 +600,7 @@ public abstract class PlayerList {
+ 
+     protected void save(ServerPlayer player) {
+         if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
++        if (MultiPaper.isExternalPlayer(player)) return; // MultiPaper
+         player.lastSave = MinecraftServer.currentTick; // Paper - Incremental chunk and player saving
+         this.playerIo.save(player);
+         ServerStatsCounter serverstatisticmanager = (ServerStatsCounter) player.getStats(); // CraftBukkit
+diff --git a/src/main/java/net/minecraft/stats/ServerStatsCounter.java b/src/main/java/net/minecraft/stats/ServerStatsCounter.java
+index fb7342f7a5008a283c3400c6313c637de8210dfa..fccc5971a031fc219696652f24bab830fa06fae7 100644
+--- a/src/main/java/net/minecraft/stats/ServerStatsCounter.java
++++ b/src/main/java/net/minecraft/stats/ServerStatsCounter.java
+@@ -48,7 +48,21 @@ public class ServerStatsCounter extends StatsCounter {
+     public ServerStatsCounter(MinecraftServer server, File file) {
+         this.server = server;
+         this.file = file;
+-        if (file.isFile()) {
++        // MultiPaper start
++        String json = null, uuid = this.file.getName().split("\\.")[0];
++        try {
++            json = puregero.multipaper.ExternalPlayer.loadedStats.remove(java.util.UUID.fromString(uuid));
++        } catch (IllegalArgumentException e) {
++            LOGGER.warn("Invalid UUID was passed, possible a plugin doing weird stuff?, you can safely ignore this if you are using such plugins: {}", e.getMessage());
++        }
++        if (json == null) json = puregero.multipaper.MultiPaper.readStats(server.storageSource.levelDirectory.path().getFileName().toString(), uuid);
++        if (json != null && !json.isEmpty() /*file.isFile()*/) {
++            try {
++                this.parseLocal(server.getFixerUpper(), json /*FileUtils.readFileToString(file)*/);
++            } catch (JsonParseException jsonparseexception) {
++                ServerStatsCounter.LOGGER.error("Couldn't parse statistics file {}", file, jsonparseexception);
++            }
++        } else if (file.isFile()) {
+             try {
+                 this.parseLocal(server.getFixerUpper(), FileUtils.readFileToString(file));
+             } catch (IOException ioexception) {
+@@ -57,6 +71,7 @@ public class ServerStatsCounter extends StatsCounter {
+                 ServerStatsCounter.LOGGER.error("Couldn't parse statistics file {}", file, jsonparseexception);
+             }
+         }
++        // MultiPaper end
+ 
+         // Paper start - Moved after stat fetching for player state file
+         // Moves the loading after vanilla loading, so it overrides the values.
+@@ -74,12 +89,9 @@ public class ServerStatsCounter extends StatsCounter {
+ 
+     public void save() {
+         if ( org.spigotmc.SpigotConfig.disableStatSaving ) return; // Spigot
+-        try {
+-            FileUtils.writeStringToFile(this.file, this.toJson());
+-        } catch (IOException ioexception) {
+-            ServerStatsCounter.LOGGER.error("Couldn't save stats", ioexception);
+-        }
+-
++        // MultiPaper start
++        puregero.multipaper.MultiPaper.writeStats(server.storageSource.levelDirectory.path().getFileName().toString(), this.file.getName().split("\\.")[0], this.toJson());
++        // MultiPaper end
+     }
+ 
+     @Override
+@@ -204,7 +216,7 @@ public class ServerStatsCounter extends StatsCounter {
+         return nbttagcompound;
+     }
+ 
+-    protected String toJson() {
++    public String toJson() {
+         Map<StatType<?>, JsonObject> map = Maps.newHashMap();
+         ObjectIterator objectiterator = this.stats.object2IntEntrySet().iterator();
+ 
+diff --git a/src/main/java/net/minecraft/world/level/storage/PlayerDataStorage.java b/src/main/java/net/minecraft/world/level/storage/PlayerDataStorage.java
+index b148cf247acdd36f856d0495cde4cc5ad32b5a2f..f582699fed9e8cf804b00fa36f50654636783933 100644
+--- a/src/main/java/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/src/main/java/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -25,10 +25,12 @@ public class PlayerDataStorage {
+ 
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private final File playerDir;
++    private final LevelStorageSource.LevelStorageAccess session; // MultiPaper
+     protected final DataFixer fixerUpper;
+     private static final DateTimeFormatter FORMATTER = FileNameDateFormatter.create();
+ 
+     public PlayerDataStorage(LevelStorageSource.LevelStorageAccess session, DataFixer dataFixer) {
++        this.session = session; // MultiPaper
+         this.fixerUpper = dataFixer;
+         this.playerDir = session.getLevelPath(LevelResource.PLAYER_DATA_DIR).toFile();
+         this.playerDir.mkdirs();
+@@ -38,6 +40,13 @@ public class PlayerDataStorage {
+         if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) return; // Spigot
+         try {
+             CompoundTag nbttagcompound = player.saveWithoutId(new CompoundTag());
++
++            // MultiPaper start
++            if (true) {
++                puregero.multipaper.MultiPaper.writePlayer(session.levelDirectory.path().getFileName().toString(), player.getStringUUID(), nbttagcompound);
++                return;
++            }
++            // MultiPaper end
+             Path path = this.playerDir.toPath();
+             Path path1 = Files.createTempFile(path, player.getStringUUID() + "-", ".dat");
+ 
+@@ -72,6 +81,16 @@ public class PlayerDataStorage {
+ 
+     // CraftBukkit start
+     private Optional<CompoundTag> load(String name, String s1, String s) { // name, uuid, extension
++        // MultiPaper start
++        try {
++            CompoundTag nbttagcompound = puregero.multipaper.MultiPaper.readPlayer(session.levelDirectory.path().getFileName().toString(), s1);
++            if (nbttagcompound != null) {
++                return Optional.of(nbttagcompound);
++            }
++        } catch (Exception exception) {
++            PlayerDataStorage.LOGGER.warn("Failed to load player data for {}", name);
++        }
++        if (false) { // MultiPaper
+         // CraftBukkit end
+         File file = this.playerDir;
+         // String s1 = entityhuman.getStringUUID(); // CraftBukkit - used above
+@@ -103,6 +122,7 @@ public class PlayerDataStorage {
+                 PlayerDataStorage.LOGGER.warn("Failed to load player data for {}", name); // CraftBukkit
+             }
+         }
++        } // MultiPaper
+ 
+         return Optional.empty();
+     }
+@@ -110,6 +130,7 @@ public class PlayerDataStorage {
+     public Optional<CompoundTag> load(Player player) {
+         // CraftBukkit start
+         return this.load(player.getName().getString(), player.getStringUUID()).map((nbttagcompound) -> {
++            /* // MultiPaper - don't read from files
+             if (player instanceof ServerPlayer) {
+                 CraftPlayer player1 = (CraftPlayer) player.getBukkitEntity();
+                 // Only update first played if it is older than the one we have
+@@ -118,6 +139,7 @@ public class PlayerDataStorage {
+                     player1.setFirstPlayed(modified);
+                 }
+             }
++            */ // MultiPaper
+ 
+             player.load(nbttagcompound); // From below
+             return nbttagcompound;
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 173e4a075078af67f030750c9a6294ab3f796677..027822dc07ae9e67f3c4bea8612e96976aa539aa 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1544,6 +1544,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+ 
+     @Override
+     public void saveData() {
++        if (puregero.multipaper.MultiPaper.isExternalPlayer(this.getHandle())) return; // MultiPaper
+         this.server.getHandle().playerIo.save(this.getHandle());
+     }
+ 
+diff --git a/src/main/java/puregero/multipaper/ExternalPlayer.java b/src/main/java/puregero/multipaper/ExternalPlayer.java
+index 491237ceccbfd536970137e69efdfa70ed593e0d..f66745e78c003fbdc72eae0b0f19374c1371a0ad 100644
+--- a/src/main/java/puregero/multipaper/ExternalPlayer.java
++++ b/src/main/java/puregero/multipaper/ExternalPlayer.java
+@@ -23,11 +23,15 @@ import java.net.InetSocketAddress;
+ public class ExternalPlayer extends ServerPlayer {
+ 
+     private static final Logger LOGGER = LogManager.getLogger(ExternalPlayer.class.getSimpleName());
++    public static java.util.HashMap<java.util.UUID, String> loadedAdvancements = new java.util.HashMap<>();
++    public static java.util.HashMap<java.util.UUID, String> loadedStats = new java.util.HashMap<>();
+     public ExternalServerConnection externalServerConnection;
+     private final InetSocketAddress address;
+     private boolean sendPackets = true;
+ 
+-    public static ExternalPlayer create(ExternalServerConnection externalServerConnection, GameProfile gameProfile, String world, double x, double y, double z, float yaw, float pitch, GameType gamemode, InetSocketAddress address, CompoundTag saveData) {
++    public static ExternalPlayer create(ExternalServerConnection externalServerConnection, GameProfile gameProfile, String world, double x, double y, double z, float yaw, float pitch, GameType gamemode, InetSocketAddress address, CompoundTag saveData, String advancements, String stats) {
++        loadedAdvancements.put(gameProfile.getId(), advancements);
++        loadedStats.put(gameProfile.getId(), stats);
+         return new ExternalPlayer(externalServerConnection, gameProfile, world, x, y, z, yaw, pitch, gamemode, address, saveData);
+     }
+ 
+diff --git a/src/main/java/puregero/multipaper/MultiPaper.java b/src/main/java/puregero/multipaper/MultiPaper.java
+index 779c7c8a349c0e916abe83a5657981b4101c31ed..39915bbd49fe09fa28ca714ed0dcf35caa6976b8 100644
+--- a/src/main/java/puregero/multipaper/MultiPaper.java
++++ b/src/main/java/puregero/multipaper/MultiPaper.java
+@@ -33,6 +33,13 @@ import org.apache.logging.log4j.Logger;
+ import net.minecraft.server.level.ServerLevel;
+ import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadLevelMessage;
+ import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WriteLevelMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadPlayerMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WritePlayerMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadAdvancementMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WriteAdvancementsMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.ReadStatsMessage;
++import puregero.multipaper.mastermessagingprotocol.messages.masterbound.WriteStatsMessage;
++import java.nio.charset.StandardCharsets;
+ import puregero.multipaper.mastermessagingprotocol.messages.serverbound.DataMessageReply;
+ 
+ public class MultiPaper {
+@@ -194,6 +201,34 @@ public class MultiPaper {
+         getConnection().send(new WriteLevelMessage(world, buffer.toByteArray()), message -> { /* do nothing */ });
+     }
+ 
++    public static CompoundTag readPlayer(String world, String uuid) throws IOException {
++        byte[] data = getConnection().sendAndAwaitReply(new ReadPlayerMessage(world, uuid), DataMessageReply.class).thenApply(message -> message.data).join();
++
++        return data.length == 0 ? null : NbtIo.readCompressed(new ByteArrayInputStream(data));
++    }
++
++    public static void writePlayer(String world, String uuid, CompoundTag compoundTag) throws IOException {
++        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++        NbtIo.writeCompressed(compoundTag, buffer);
++        getConnection().send(new WritePlayerMessage(world, uuid, buffer.toByteArray()), message -> { /* do nothing */ });
++    }
++
++    public static String readAdvancements(String world, String uuid) {
++        return getConnection().sendAndAwaitReply(new ReadAdvancementMessage(world, uuid), DataMessageReply.class).thenApply(message -> new String(message.data, StandardCharsets.UTF_8)).join();
++    }
++
++    public static void writeAdvancements(String world, String uuid, String json) {
++        getConnection().send(new WriteAdvancementsMessage(world, uuid, json.getBytes(StandardCharsets.UTF_8)), message -> { /* do nothing */ });
++    }
++
++    public static String readStats(String world, String uuid) {
++        return getConnection().sendAndAwaitReply(new ReadStatsMessage(world, uuid), DataMessageReply.class).thenApply(message -> new String(message.data, StandardCharsets.UTF_8)).join();
++    }
++
++    public static void writeStats(String world, String uuid, String json) {
++        getConnection().send(new WriteStatsMessage(world, uuid, json.getBytes(StandardCharsets.UTF_8)), message -> { /* do nothing */ });
++    }
++
+     public static byte[] nbtToBytes(CompoundTag compoundTag) throws IOException {
+         if (compoundTag == null) {
+             return new byte[0];
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java
+index cab651911ef8f1739a65477a88b8f5eff84dfb1b..e02a78c011758cdce9eb25e3b3d5b7838ec78d0a 100644
+--- a/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/PlayerCreatePacket.java
+@@ -32,6 +32,8 @@ public class PlayerCreatePacket extends ExternalServerPacket {
+     private final byte[] ip;
+     private final short port;
+     private final CompoundTag saveData;
++    private final String advancements;
++    private final String stats;
+ 
+     private PlayerCreatePacket(ServerPlayer player, CompoundTag saveData) {
+         this.gameProfile = player.gameProfile;
+@@ -45,6 +47,8 @@ public class PlayerCreatePacket extends ExternalServerPacket {
+         this.ip = ((InetSocketAddress) player.connection.connection.address).getAddress().getAddress();
+         this.port = (short) ((InetSocketAddress) player.connection.connection.address).getPort();
+         this.saveData = saveData;
++        this.advancements = player.getAdvancements().generateJson().toString();
++        this.stats = ((net.minecraft.stats.ServerStatsCounter) player.getStats()).toJson();
+     }
+ 
+     public PlayerCreatePacket(FriendlyByteBuf in) {
+@@ -60,6 +64,8 @@ public class PlayerCreatePacket extends ExternalServerPacket {
+         ip = in.readByteArray();
+         port = in.readShort();
+         saveData = in.readNbt();
++        advancements = in.readUtf(Integer.MAX_VALUE / 6);
++        stats = in.readUtf(Integer.MAX_VALUE / 6);
+     }
+ 
+     @Override
+@@ -75,6 +81,8 @@ public class PlayerCreatePacket extends ExternalServerPacket {
+         out.writeByteArray(ip);
+         out.writeShort(port);
+         out.writeNbt(saveData);
++        out.writeUtf(advancements, Integer.MAX_VALUE / 6);
++        out.writeUtf(stats, Integer.MAX_VALUE / 6);
+     }
+ 
+     @Override
+@@ -94,7 +102,7 @@ public class PlayerCreatePacket extends ExternalServerPacket {
+                 e.printStackTrace();
+             }
+ 
+-            ExternalPlayer.create(connection, gameProfile, world, x, y, z, yaw, pitch, gamemode, address, saveData);
++            ExternalPlayer.create(connection, gameProfile, world, x, y, z, yaw, pitch, gamemode, address, saveData, advancements, stats);
+         });
+     }
+ 
