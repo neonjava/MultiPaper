@@ -1,0 +1,413 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: neonjava <neonjavadev@gmail.com>
+Date: Sun, 28 Nov 2021 16:34:05 +1000
+Subject: [PATCH] Sync ender dragon fight
+
+
+diff --git a/src/main/java/net/minecraft/server/level/ServerBossEvent.java b/src/main/java/net/minecraft/server/level/ServerBossEvent.java
+index 4f91107f9ae42f96c060c310596db9aa869a8dbc..92a02c82aa0277ff4199fd5a0a94b843677cc948 100644
+--- a/src/main/java/net/minecraft/server/level/ServerBossEvent.java
++++ b/src/main/java/net/minecraft/server/level/ServerBossEvent.java
+@@ -6,6 +6,7 @@ import com.google.common.collect.Sets;
+ import java.util.Collection;
+ import java.util.Collections;
+ import java.util.Set;
++import java.util.UUID;
+ import java.util.function.Function;
+ import net.minecraft.network.chat.Component;
+ import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
+@@ -17,6 +18,12 @@ public class ServerBossEvent extends BossEvent {
+     private final Set<ServerPlayer> unmodifiablePlayers = Collections.unmodifiableSet(this.players);
+     public boolean visible = true;
+ 
++    // MultiPaper start - allow for a specified uuid
++    public ServerBossEvent(UUID uuid, Component displayName, BossEvent.BossBarColor color, BossEvent.BossBarOverlay style) {
++        super(uuid, displayName, color, style);
++    }
++    // MultiPaper end - allow for a specified uuid
++
+     public ServerBossEvent(Component displayName, BossEvent.BossBarColor color, BossEvent.BossBarOverlay style) {
+         super(Mth.createInsecureUUID(), displayName, color, style);
+     }
+diff --git a/src/main/java/net/minecraft/world/level/dimension/end/EndDragonFight.java b/src/main/java/net/minecraft/world/level/dimension/end/EndDragonFight.java
+index 84300f2f7b7be4f5281edd8e263646dbcbb3ba07..6385afc5939ca575056d78839cad201a5c0c0266 100644
+--- a/src/main/java/net/minecraft/world/level/dimension/end/EndDragonFight.java
++++ b/src/main/java/net/minecraft/world/level/dimension/end/EndDragonFight.java
+@@ -51,8 +51,8 @@ import net.minecraft.world.level.block.state.pattern.BlockPattern;
+ import net.minecraft.world.level.block.state.pattern.BlockPatternBuilder;
+ import net.minecraft.world.level.block.state.predicate.BlockPredicate;
+ import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.ChunkStatus;
+ import net.minecraft.world.level.chunk.LevelChunk;
+-import net.minecraft.world.level.chunk.status.ChunkStatus;
+ import net.minecraft.world.level.levelgen.Heightmap;
+ import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+ import net.minecraft.world.level.levelgen.feature.EndPodiumFeature;
+@@ -60,6 +60,8 @@ import net.minecraft.world.level.levelgen.feature.SpikeFeature;
+ import net.minecraft.world.level.levelgen.feature.configurations.FeatureConfiguration;
+ import net.minecraft.world.phys.AABB;
+ import org.slf4j.Logger;
++import puregero.multipaper.MultiPaper;
++import puregero.multipaper.externalserverprotocol.SetEndDragonFightDataPacket;
+ 
+ public class EndDragonFight {
+ 
+@@ -73,7 +75,7 @@ public class EndDragonFight {
+     private static final int GATEWAY_DISTANCE = 96;
+     public static final int DRAGON_SPAWN_Y = 128;
+     private final Predicate<Entity> validPlayer;
+-    private static final Component DEFAULT_BOSS_EVENT_NAME = Component.translatable("entity.minecraft.ender_dragon"); // Paper - ensure reset EnderDragon boss event name
++    private static final Component DEFAULT_BOSS_EVENT_NAME = Component.translatable("entity.minecraft.ender_dragon"); // Paper
+     public final ServerBossEvent dragonEvent;
+     public final ServerLevel level;
+     private final BlockPos origin;
+@@ -84,7 +86,7 @@ public class EndDragonFight {
+     private int ticksSinceCrystalsScanned;
+     private int ticksSinceLastPlayerScan;
+     private boolean dragonKilled;
+-    public boolean previouslyKilled;
++    private boolean previouslyKilled;
+     private boolean skipArenaLoadedCheck;
+     @Nullable
+     public UUID dragonUUID;
+@@ -96,20 +98,36 @@ public class EndDragonFight {
+     private int respawnTime;
+     @Nullable
+     public List<EndCrystal> respawnCrystals;
++    private final long gatewaysSeed; // MultiPaper - add ender dragon fight syncing
+ 
+     public EndDragonFight(ServerLevel world, long gatewaysSeed, EndDragonFight.Data data) {
+         this(world, gatewaysSeed, data, BlockPos.ZERO);
+     }
+ 
+     public EndDragonFight(ServerLevel world, long gatewaysSeed, EndDragonFight.Data data, BlockPos origin) {
+-        this.dragonEvent = (ServerBossEvent) (new ServerBossEvent(DEFAULT_BOSS_EVENT_NAME, BossEvent.BossBarColor.PINK, BossEvent.BossBarOverlay.PROGRESS)).setPlayBossMusic(true).setCreateWorldFog(true); // Paper - ensure reset EnderDragon boss event name
++        this.dragonEvent = (ServerBossEvent) (new ServerBossEvent(UUID.fromString("479e9726-3019-4c90-8bef-0da73cb1ee85"), DEFAULT_BOSS_EVENT_NAME, BossEvent.BossBarColor.PINK, BossEvent.BossBarOverlay.PROGRESS)).setPlayBossMusic(true).setCreateWorldFog(true); // Paper // MultiPaper - add specific uuid
+         this.gateways = new ObjectArrayList();
+         this.ticksSinceLastPlayerScan = 21;
+         this.skipArenaLoadedCheck = false;
+         this.needsStateScanning = true;
++        // Paper start
++        this.needsStateScanning = world.paperConfig().entities.spawning.scanForLegacyEnderDragon;
++        if (!this.needsStateScanning) this.dragonKilled = true;
++        // Paper end
+         this.level = world;
+         this.origin = origin;
+         this.validPlayer = EntitySelector.ENTITY_STILL_ALIVE.and(EntitySelector.withinDistance((double) origin.getX(), (double) (128 + origin.getY()), (double) origin.getZ(), 192.0D));
++        // MultiPaper start - add ender dragon fight syncing
++        this.gatewaysSeed = gatewaysSeed;
++        this.exitPortalPattern = BlockPatternBuilder.start().aisle("       ", "       ", "       ", "   #   ", "       ", "       ", "       ").aisle("       ", "       ", "       ", "   #   ", "       ", "       ", "       ").aisle("       ", "       ", "       ", "   #   ", "       ", "       ", "       ").aisle("  ###  ", " #   # ", "#     #", "#  #  #", "#     #", " #   # ", "  ###  ").aisle("       ", "  ###  ", " ##### ", " ##### ", " ##### ", "  ###  ", "       ").where('#', BlockInWorld.hasState(BlockPredicate.forBlock(Blocks.BEDROCK))).build();
++    }
++
++    public void sendDataSync() {
++        MultiPaper.broadcastPacketToExternalServers(new SetEndDragonFightDataPacket(this.level, this.saveData()));
++    }
++
++    public void load(EndDragonFight.Data data) {
++        // MultiPaper end - add ender dragon fight syncing
+         this.needsStateScanning = data.needsStateScanning;
+         this.dragonUUID = (UUID) data.dragonUUID.orElse(null); // CraftBukkit - decompile error
+         this.dragonKilled = data.dragonKilled;
+@@ -117,21 +135,16 @@ public class EndDragonFight {
+         if (data.isRespawning) {
+             this.respawnStage = DragonRespawnAnimation.START;
+         }
+-        // Paper start - Add config to disable ender dragon legacy check
+-        if (data == EndDragonFight.Data.DEFAULT && !world.paperConfig().entities.spawning.scanForLegacyEnderDragon) {
+-            this.needsStateScanning = false;
+-            this.dragonKilled = true;
+-        }
+-        // Paper end - Add config to disable ender dragon legacy check
+ 
+         this.portalLocation = (BlockPos) data.exitPortalLocation.orElse(null); // CraftBukkit - decompile error
++        this.gateways.clear(); // MultiPaper
+         this.gateways.addAll((Collection) data.gateways.orElseGet(() -> {
+             ObjectArrayList<Integer> objectarraylist = new ObjectArrayList(ContiguousSet.create(Range.closedOpen(0, 20), DiscreteDomain.integers()));
+ 
+             Util.shuffle(objectarraylist, RandomSource.create(gatewaysSeed));
+             return objectarraylist;
+         }));
+-        this.exitPortalPattern = BlockPatternBuilder.start().aisle("       ", "       ", "       ", "   #   ", "       ", "       ", "       ").aisle("       ", "       ", "       ", "   #   ", "       ", "       ", "       ").aisle("       ", "       ", "       ", "   #   ", "       ", "       ", "       ").aisle("  ###  ", " #   # ", "#     #", "#  #  #", "#     #", " #   # ", "  ###  ").aisle("       ", "  ###  ", " ##### ", " ##### ", " ##### ", "  ###  ", "       ").where('#', BlockInWorld.hasState(BlockPredicate.forBlock(Blocks.BEDROCK))).build();
++        // MultiPaper - move up
+     }
+ 
+     /** @deprecated */
+@@ -153,7 +166,8 @@ public class EndDragonFight {
+         }
+ 
+         if (!this.dragonEvent.getPlayers().isEmpty()) {
+-            this.level.getChunkSource().addRegionTicket(TicketType.DRAGON, new ChunkPos(0, 0), 9, Unit.INSTANCE);
++            if (this.dragonEvent.getPlayers().stream().anyMatch(MultiPaper::isRealPlayer)) this.level.getChunkSource().addRegionTicket(TicketType.DRAGON, new ChunkPos(0, 0), 9, Unit.INSTANCE); // MultiPaper - only request chunk ownership if we have a player there
++            if (!MultiPaper.isChunkLocal(this.level, new BlockPos(0, 0, 0))) return; // MultiPaper - only tick the dragon if we own the end island
+             boolean flag = this.isArenaLoaded();
+ 
+             if (this.needsStateScanning && flag) {
+@@ -212,9 +226,9 @@ public class EndDragonFight {
+             this.dragonUUID = entityenderdragon.getUUID();
+             EndDragonFight.LOGGER.info("Found that there's a dragon still alive ({})", entityenderdragon);
+             this.dragonKilled = false;
+-            if (!flag && this.level.paperConfig().entities.behavior.shouldRemoveDragon) { // Paper - Toggle for removing existing dragon
++            if (!flag && this.level.paperConfig().entities.behavior.shouldRemoveDragon) {
+                 EndDragonFight.LOGGER.info("But we didn't have a portal, let's remove it.");
+-                entityenderdragon.discard(null); // CraftBukkit - add Bukkit remove cause
++                entityenderdragon.discard();
+                 this.dragonUUID = null;
+             }
+         }
+@@ -223,6 +237,7 @@ public class EndDragonFight {
+             this.dragonKilled = false;
+         }
+ 
++        this.sendDataSync(); // MultiPaper
+     }
+ 
+     private void findOrCreateDragon() {
+@@ -234,6 +249,7 @@ public class EndDragonFight {
+         } else {
+             EndDragonFight.LOGGER.debug("Haven't seen our dragon, but found another one to use.");
+             this.dragonUUID = ((EnderDragon) list.get(0)).getUUID();
++            this.sendDataSync(); // MultiPaper
+         }
+ 
+     }
+@@ -260,6 +276,7 @@ public class EndDragonFight {
+             } else {
+                 this.respawnStage = spawnState;
+             }
++            this.sendDataSync(); // MultiPaper
+ 
+         }
+     }
+@@ -410,26 +427,27 @@ public class EndDragonFight {
+             this.dragonEvent.setVisible(false);
+             this.spawnExitPortal(true);
+             this.spawnNewGateway();
+-            // Paper start - Add DragonEggFormEvent
++            // Paper start - DragonEggFormEvent
+             BlockPos eggPosition = this.level.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING, EndPodiumFeature.getLocation(this.origin));
+             org.bukkit.craftbukkit.block.CraftBlockState eggState = org.bukkit.craftbukkit.block.CraftBlockStates.getBlockState(this.level, eggPosition);
+             eggState.setData(Blocks.DRAGON_EGG.defaultBlockState());
+             io.papermc.paper.event.block.DragonEggFormEvent eggEvent = new io.papermc.paper.event.block.DragonEggFormEvent(org.bukkit.craftbukkit.block.CraftBlock.at(this.level, eggPosition), eggState,
+                 new org.bukkit.craftbukkit.boss.CraftDragonBattle(this));
+-            // Paper end - Add DragonEggFormEvent
+-            if (this.level.paperConfig().entities.behavior.enderDragonsDeathAlwaysPlacesDragonEgg || !this.previouslyKilled) { // Paper - Add toggle for always placing the dragon egg
+-                // Paper start - Add DragonEggFormEvent
++            // Paper end - DragonEggFormEvent
++            if (this.level.paperConfig().entities.behavior.enderDragonsDeathAlwaysPlacesDragonEgg || !this.previouslyKilled) { // Paper - always place dragon egg
++                // Paper start - DragonEggFormEvent
+                 // this.level.setBlockAndUpdate(this.level.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING, EndPodiumFeature.getLocation(this.origin)), Blocks.DRAGON_EGG.defaultBlockState());
+             } else {
+                 eggEvent.setCancelled(true);
+             }
+             if (eggEvent.callEvent()) {
+                 eggEvent.getNewState().update(true);
+-                // Paper end - Add DragonEggFormEvent
+             }
++            // Paper end - DragonEggFormEvent
+ 
+             this.previouslyKilled = true;
+             this.dragonKilled = true;
++            this.sendDataSync(); // MultiPaper
+         }
+ 
+     }
+@@ -441,7 +459,7 @@ public class EndDragonFight {
+         this.gateways.clear();
+     }
+ 
+-    // Paper start - More DragonBattle API
++    // Paper start
+     public boolean spawnNewGatewayIfPossible() {
+         if (!this.gateways.isEmpty()) {
+             this.spawnNewGateway();
+@@ -457,7 +475,7 @@ public class EndDragonFight {
+         }
+         return endCrystals;
+     }
+-    // Paper end - More DragonBattle API
++    // Paper end
+ 
+     private void spawnNewGateway() {
+         if (!this.gateways.isEmpty()) {
+@@ -466,6 +484,7 @@ public class EndDragonFight {
+             int k = Mth.floor(96.0D * Math.sin(2.0D * (-3.141592653589793D + 0.15707963267948966D * (double) i)));
+ 
+             this.spawnNewGateway(new BlockPos(j, 75, k));
++            this.sendDataSync(); // MultiPaper
+         }
+     }
+ 
+@@ -491,13 +510,8 @@ public class EndDragonFight {
+         if (this.portalLocation.getY() <= this.level.getMinBuildHeight()) {
+             this.portalLocation = this.portalLocation.atY(this.level.getMinBuildHeight() + 1);
+         }
+-        // Paper end - Prevent "softlocked" exit portal generation
+-        if (worldgenendtrophy.place(FeatureConfiguration.NONE, this.level, this.level.getChunkSource().getGenerator(), RandomSource.create(), this.portalLocation)) {
+-            int i = Mth.positiveCeilDiv(4, 16);
+-
+-            this.level.getChunkSource().chunkMap.waitForLightBeforeSending(new ChunkPos(this.portalLocation), i);
+-        }
+-
++        // Paper end
++        worldgenendtrophy.place(FeatureConfiguration.NONE, this.level, this.level.getChunkSource().getGenerator(), RandomSource.create(), this.portalLocation);
+     }
+ 
+     @Nullable
+@@ -512,7 +526,8 @@ public class EndDragonFight {
+             entityenderdragon.moveTo((double) this.origin.getX(), (double) (128 + this.origin.getY()), (double) this.origin.getZ(), this.level.random.nextFloat() * 360.0F, 0.0F);
+             this.level.addFreshEntity(entityenderdragon);
+             this.dragonUUID = entityenderdragon.getUUID();
+-            this.resetSpikeCrystals(); // Paper - Reset ender crystals on dragon spawn
++            this.resetSpikeCrystals(); // Paper
++            this.sendDataSync(); // MultiPaper
+         }
+ 
+         return entityenderdragon;
+@@ -524,10 +539,10 @@ public class EndDragonFight {
+             this.ticksSinceDragonSeen = 0;
+             if (dragon.hasCustomName()) {
+                 this.dragonEvent.setName(dragon.getDisplayName());
+-                // Paper start - ensure reset EnderDragon boss event name
++                // Paper start - reset to default name
+             } else {
+                 this.dragonEvent.setName(DEFAULT_BOSS_EVENT_NAME);
+-                // Paper end - ensure reset EnderDragon boss event name
++                // Paper end
+             }
+         }
+ 
+@@ -544,6 +559,7 @@ public class EndDragonFight {
+             this.respawnTime = 0;
+             this.resetSpikeCrystals();
+             this.spawnExitPortal(true);
++            this.sendDataSync(); // MultiPaper
+         } else {
+             this.updateCrystalCount();
+             Entity entity = this.level.getEntity(this.dragonUUID);
+@@ -560,12 +576,12 @@ public class EndDragonFight {
+     }
+ 
+     public boolean tryRespawn() { // CraftBukkit - return boolean
+-        // Paper start - Perf: Do crystal-portal proximity check before entity lookup
++        // Paper start - pass null (indicating no placed end crystal involved) by default
+         return this.tryRespawn(null);
+     }
+ 
+     public boolean tryRespawn(@Nullable BlockPos placedEndCrystalPos) { // placedEndCrystalPos is null if the tryRespawn() call was not caused by a placed end crystal
+-        // Paper end - Perf: Do crystal-portal proximity check before entity lookup
++        // Paper end
+         if (this.dragonKilled && this.respawnStage == null) {
+             BlockPos blockposition = this.portalLocation;
+ 
+@@ -583,7 +599,7 @@ public class EndDragonFight {
+                 blockposition = this.portalLocation;
+             }
+ 
+-            // Paper start - Perf: Do crystal-portal proximity check before entity lookup
++            // Paper start - check placed end crystal to portal proximity before attempting to respawn dragon
+             if (placedEndCrystalPos != null) {
+                 // The end crystal must be 0 or 1 higher than the portal origin
+                 int dy = placedEndCrystalPos.getY() - blockposition.getY();
+@@ -597,7 +613,7 @@ public class EndDragonFight {
+                     return false;
+                 }
+             }
+-            // Paper end - Perf: Do crystal-portal proximity check before entity lookup
++            // Paper end
+ 
+             List<EndCrystal> list = Lists.newArrayList();
+             BlockPos blockposition1 = blockposition.above(1);
+@@ -620,7 +636,7 @@ public class EndDragonFight {
+         return false; // CraftBukkit - return value
+     }
+ 
+-    public boolean respawnDragon(List<EndCrystal> list) { // CraftBukkit - return boolean
++    public boolean respawnDragon(List<EndCrystal> list) { // PAIL private -> public // CraftBukkit - return boolean
+         if (this.dragonKilled && this.respawnStage == null) {
+             for (BlockPattern.BlockPatternMatch shapedetector_shapedetectorcollection = this.findExitPortal(); shapedetector_shapedetectorcollection != null; shapedetector_shapedetectorcollection = this.findExitPortal()) {
+                 for (int i = 0; i < this.exitPortalPattern.getWidth(); ++i) {
+@@ -640,6 +656,7 @@ public class EndDragonFight {
+             this.respawnTime = 0;
+             this.spawnExitPortal(false);
+             this.respawnCrystals = list;
++            this.sendDataSync(); // MultiPaper
+             return true; // CraftBukkit - return value
+         }
+         return false; // CraftBukkit - return value
+@@ -671,7 +688,7 @@ public class EndDragonFight {
+     public static record Data(boolean needsStateScanning, boolean dragonKilled, boolean previouslyKilled, boolean isRespawning, Optional<UUID> dragonUUID, Optional<BlockPos> exitPortalLocation, Optional<List<Integer>> gateways) {
+ 
+         public static final Codec<EndDragonFight.Data> CODEC = RecordCodecBuilder.create((instance) -> {
+-            return instance.group(Codec.BOOL.fieldOf("NeedsStateScanning").orElse(true).forGetter(EndDragonFight.Data::needsStateScanning), Codec.BOOL.fieldOf("DragonKilled").orElse(false).forGetter(EndDragonFight.Data::dragonKilled), Codec.BOOL.fieldOf("PreviouslyKilled").orElse(false).forGetter(EndDragonFight.Data::previouslyKilled), Codec.BOOL.lenientOptionalFieldOf("IsRespawning", false).forGetter(EndDragonFight.Data::isRespawning), UUIDUtil.CODEC.lenientOptionalFieldOf("Dragon").forGetter(EndDragonFight.Data::dragonUUID), BlockPos.CODEC.lenientOptionalFieldOf("ExitPortalLocation").forGetter(EndDragonFight.Data::exitPortalLocation), Codec.list(Codec.INT).lenientOptionalFieldOf("Gateways").forGetter(EndDragonFight.Data::gateways)).apply(instance, EndDragonFight.Data::new);
++            return instance.group(Codec.BOOL.fieldOf("NeedsStateScanning").orElse(true).forGetter(EndDragonFight.Data::needsStateScanning), Codec.BOOL.fieldOf("DragonKilled").orElse(false).forGetter(EndDragonFight.Data::dragonKilled), Codec.BOOL.fieldOf("PreviouslyKilled").orElse(false).forGetter(EndDragonFight.Data::previouslyKilled), Codec.BOOL.optionalFieldOf("IsRespawning", false).forGetter(EndDragonFight.Data::isRespawning), UUIDUtil.CODEC.optionalFieldOf("Dragon").forGetter(EndDragonFight.Data::dragonUUID), BlockPos.CODEC.optionalFieldOf("ExitPortalLocation").forGetter(EndDragonFight.Data::exitPortalLocation), Codec.list(Codec.INT).optionalFieldOf("Gateways").forGetter(EndDragonFight.Data::gateways)).apply(instance, EndDragonFight.Data::new);
+         });
+         public static final EndDragonFight.Data DEFAULT = new EndDragonFight.Data(true, false, false, false, Optional.empty(), Optional.empty(), Optional.empty());
+     }
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java b/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java
+index 686f966b6ac4b317e32e9c24d56bacc64999bfed..48197e7ee126c806970ac439fb7ba19769652856 100644
+--- a/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/ExternalServerPacketSerializer.java
+@@ -44,6 +44,7 @@ public class ExternalServerPacketSerializer {
+         addPacket(EntityRemovePacket.class, EntityRemovePacket::new);
+         addPacket(PlayerActionOnEntityPacket.class, PlayerActionOnEntityPacket::new);
+         addPacket(PlayerTouchEntityPacket.class, PlayerTouchEntityPacket::new);
++        addPacket(SetEndDragonFightDataPacket.class, SetEndDragonFightDataPacket::new);
+     }
+ 
+     private static void addPacket(Class<? extends ExternalServerPacket> clazz, Function<FriendlyByteBuf, ExternalServerPacket> deserializer) {
+diff --git a/src/main/java/puregero/multipaper/externalserverprotocol/SetEndDragonFightDataPacket.java b/src/main/java/puregero/multipaper/externalserverprotocol/SetEndDragonFightDataPacket.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e13ee06225c73bcab684d41341a84f582a153cb8
+--- /dev/null
++++ b/src/main/java/puregero/multipaper/externalserverprotocol/SetEndDragonFightDataPacket.java
+@@ -0,0 +1,50 @@
++package puregero.multipaper.externalserverprotocol;
++
++import net.minecraft.network.FriendlyByteBuf;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.level.dimension.end.EndDragonFight;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import org.bukkit.Bukkit;
++import org.bukkit.World;
++import org.bukkit.craftbukkit.CraftWorld;
++import puregero.multipaper.ExternalServerConnection;
++import puregero.multipaper.MultiPaper;
++
++import java.util.UUID;
++
++public class SetEndDragonFightDataPacket extends ExternalServerPacket {
++    private static final Logger LOGGER = LogManager.getLogger(SetEndDragonFightDataPacket.class.getSimpleName());
++
++    private final UUID world;
++    private final EndDragonFight.Data data;
++
++    public SetEndDragonFightDataPacket(ServerLevel level, EndDragonFight.Data data) {
++        this.world = level.getWorld().getUID();
++        this.data = data;
++    }
++
++    public SetEndDragonFightDataPacket(FriendlyByteBuf in) {
++        this.world = in.readUUID();
++        this.data = in.readJsonWithCodec(EndDragonFight.Data.CODEC);
++    }
++
++    @Override
++    public void write(FriendlyByteBuf out) {
++        out.writeUUID(this.world);
++        out.writeJsonWithCodec(EndDragonFight.Data.CODEC, this.data);
++    }
++
++    @Override
++    public void handle(ExternalServerConnection connection) {
++        MultiPaper.runSync(() -> {
++            World world = Bukkit.getWorld(this.world);
++            if (world instanceof CraftWorld craftWorld) {
++                EndDragonFight endDragonFight = craftWorld.getHandle().getDragonFight();
++                if (endDragonFight != null) {
++                    endDragonFight.load(this.data);
++                }
++            }
++        });
++    }
++}
